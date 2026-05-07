@@ -1,0 +1,18 @@
+{
+  "servers": {
+    "joomla-mcp": {
+      "type": "stdio",
+      "command": "node",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "dist/index.js"
+      ],
+      "dev": {
+        "watch": "src/**/*.ts",
+        "debug": {
+          "type": "node"
+        }
+      }
+    },
+  }
+}

@@ -1,0 +1,6 @@
+.env
+.mcp.json
+.claude/
+node_modules/
+dist/
+snapshots/

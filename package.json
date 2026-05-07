@@ -1,0 +1,32 @@
+{
+  "name": "joomla-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for Joomla 3 backend management",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "smoke": "tsx scripts/tests/smoke.ts",
+    "test:all-tools": "npm run build && tsx scripts/tests/mcp-all-tools-test.ts",
+    "test:tools:content": "npm run build && cross-env TEST_SUITE=content tsx scripts/tests/mcp-all-tools-test.ts",
+    "test:tools:modules": "npm run build && cross-env TEST_SUITE=modules tsx scripts/tests/mcp-all-tools-test.ts",
+    "test:tools:gantry": "npm run build && cross-env TEST_SUITE=gantry tsx scripts/tests/mcp-all-tools-test.ts",
+    "test:tools:menus": "npm run build && cross-env TEST_SUITE=menus tsx scripts/tests/mcp-all-tools-test.ts",
+    "test:tools:admin": "npm run build && cross-env TEST_SUITE=admin tsx scripts/tests/mcp-all-tools-test.ts",
+    "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.4.2",
+    "js-yaml": "^4.1.1"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^25.6.0",
+    "cross-env": "^7.0.3",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  }
+}
