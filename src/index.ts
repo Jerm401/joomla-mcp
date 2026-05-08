@@ -13,6 +13,12 @@ const config = {
   baseUrl: process.env.JOOMLA_BASE_URL || "https://example.com/administrator",
   username: process.env.JOOMLA_USERNAME || "",
   password: process.env.JOOMLA_PASSWORD || "",
+  moduleTypeBlacklist: new Set(
+    (process.env.MODULE_TYPE_BLACKLIST || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  ),
 };
 
 // Create Joomla client instance
@@ -182,7 +188,7 @@ const tools = [
   {
     name: "joomla_update_article",
     description:
-      "Update an existing article by ID. Only provided fields will be changed. Fields: title, alias, categoryId, content, state, access, introImage, introImageAlt, featuredImage, featuredImageAlt.",
+      "Update an existing article by ID. Only provided fields will be changed. Fields: title, alias, categoryId, content, state, access, ordering, introImage, introImageAlt, featuredImage, featuredImageAlt.",
     inputSchema: {
       type: "object",
       properties: {
@@ -213,6 +219,10 @@ const tools = [
         access: {
           type: "string",
           description: "Access level: 1=Public, 2=Special, 3=Registered",
+        },
+        ordering: {
+          type: "string",
+          description: "Place this article after the article with this ID (within the same category). Use -1 to move to first position. Use joomla_list_articles to find sibling IDs.",
         },
         introImage: {
           type: "string",
@@ -346,7 +356,7 @@ const tools = [
   {
     name: "joomla_update_category",
     description:
-      "Update an existing category by ID. Only provided fields will be changed. Fields: title, alias, parentId, description, published.",
+      "Update an existing category by ID. Only provided fields will be changed. Fields: title, alias, parentId, description, published, ordering.",
     inputSchema: {
       type: "object",
       properties: {
@@ -373,6 +383,10 @@ const tools = [
         published: {
           type: "string",
           description: "Published state: 1=yes, 0=no",
+        },
+        ordering: {
+          type: "string",
+          description: "Place this category after the category with this ID (within the same parent). Use -1 to move to first position. Use joomla_list_categories to find sibling IDs.",
         },
       },
       required: ["id"],
@@ -698,7 +712,7 @@ const tools = [
   {
     name: "joomla_list_menu_items",
     description:
-      "List menu items for a specific menu. Requires menuId, which should be the menuType returned by joomla_list_menus (for example 'mainmenu'). Returns array of menu items.",
+      "List menu items for a specific menu. Requires menuId, which should be the menuType returned by joomla_list_menus (for example 'mainmenu'). Returns array of menu items, each with parentId and parentTitle (parentTitle is 'Root' for top-level items with no parent).",
     inputSchema: {
       type: "object",
       properties: {
@@ -779,6 +793,10 @@ const tools = [
           description: "Menu params, e.g. {\"show_page_heading\":\"1\"}",
           additionalProperties: { type: "string" },
         },
+        templateStyleId: {
+          type: "string",
+          description: "Template style ID controlling which Gantry outline applies (0 = site default). Use joomla_get_menu_item to see available options in templateStyleOptions.",
+        },
         fieldOverrides: {
           type: "object",
           description: "Raw Joomla form field overrides, e.g. {\"jform[params][menu-anchor_title]\":\"Title\"}",
@@ -808,6 +826,14 @@ const tools = [
         browserNav: { type: "string", description: "Browser target" },
         home: { type: "string", description: "Home/default state" },
         note: { type: "string", description: "Admin note" },
+        templateStyleId: {
+          type: "string",
+          description: "Template style ID controlling which Gantry outline applies (0 = site default). Use joomla_get_menu_item to see available options in templateStyleOptions.",
+        },
+        ordering: {
+          type: "string",
+          description: "Place this menu item after the sibling item with this ID. Use -1 to move to first position. Use joomla_list_menu_items to find sibling IDs.",
+        },
         request: { type: "object", additionalProperties: { type: "string" } },
         params: { type: "object", additionalProperties: { type: "string" } },
         fieldOverrides: { type: "object", additionalProperties: { type: "string" } },
@@ -1266,6 +1292,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           content: args?.content as string,
           state: args?.state as string,
           access: args?.access as string,
+          ordering: args?.ordering as string,
           introImage: args?.introImage as string,
           introImageAlt: args?.introImageAlt as string,
           featuredImage: args?.featuredImage as string,
@@ -1372,6 +1399,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           parentId: args?.parentId as string,
           description: args?.description as string,
           published: args?.published as string,
+          ordering: args?.ordering as string,
         });
         return {
           content: [{ type: "text", text: formatResult(result) }],
@@ -1743,6 +1771,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           browserNav: args?.browserNav as string,
           home: args?.home as string,
           note: args?.note as string,
+          templateStyleId: args?.templateStyleId as string,
           request: args?.request as Record<string, string>,
           params: args?.params as Record<string, string>,
           fieldOverrides: args?.fieldOverrides as Record<string, string>,
@@ -1773,6 +1802,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           browserNav: args?.browserNav as string,
           home: args?.home as string,
           note: args?.note as string,
+          templateStyleId: args?.templateStyleId as string,
+          ordering: args?.ordering as string,
           request: args?.request as Record<string, string>,
           params: args?.params as Record<string, string>,
           fieldOverrides: args?.fieldOverrides as Record<string, string>,

@@ -9,6 +9,7 @@ export interface JoomlaConfig {
   baseUrl: string;
   username: string;
   password: string;
+  moduleTypeBlacklist?: Set<string>;
 }
 
 export interface JoomlaResponse {
@@ -494,9 +495,13 @@ export class JoomlaClient {
     }) || null;
   }
 
-  private parseMenuItemForm(html: string): Record<string, string | Record<string, string>> {
-    const fields = this.extractFormFields(html);
-    const item: Record<string, string | Record<string, string>> = {};
+  private parseMenuItemForm(html: string): Record<string, unknown> {
+    const adminForms = this.parseAdminForms(html, "item-form");
+    const form = adminForms[0] as Record<string, unknown> | undefined;
+    const fields = (form?.values || {}) as Record<string, string>;
+    const fieldDetails = (form?.fields || []) as AdminFieldDetails[];
+
+    const item: Record<string, unknown> = {};
     const request: Record<string, string> = {};
     const params: Record<string, string> = {};
 
@@ -520,6 +525,8 @@ export class JoomlaClient {
     item.browserNav = this.getJFormField(fields, "browserNav", "0");
     item.home = this.getJFormField(fields, "home", "0");
     item.note = this.getJFormField(fields, "note");
+    item.templateStyleId = fields["jform[template_style_id]"] ?? "0";
+    item.templateStyleOptions = fieldDetails.find((f) => f.name === "jform[template_style_id]")?.options ?? [];
     item.request = request;
     item.params = params;
     return item;
@@ -2062,6 +2069,7 @@ export class JoomlaClient {
       content?: string;
       state?: string;
       access?: string;
+      ordering?: string;
       introImage?: string;
       introImageAlt?: string;
       featuredImage?: string;
@@ -2094,6 +2102,10 @@ export class JoomlaClient {
       "jform[images][image_fulltext_alt]": data.featuredImageAlt ?? existingArticle.featuredImageAlt ?? "",
       [token.name]: token.value,
     };
+
+    if (data.ordering !== undefined) {
+      formData["jform[ordering]"] = data.ordering;
+    }
 
     const result = await this.postPage(editUrl, formData);
     const successMsg = result.html.includes("Article saved") || result.html.includes("The article has been saved");
@@ -2389,6 +2401,7 @@ export class JoomlaClient {
       parentId?: string;
       description?: string;
       published?: string;
+      ordering?: string;
     }
   ): Promise<JoomlaResponse> {
     const editUrl = this.getAdminUrl(`index.php?option=com_categories&task=category.edit&id=${id}&extension=com_content`);
@@ -2428,20 +2441,103 @@ export class JoomlaClient {
     };
     const verified = Object.values(verification).every((value) => value === true);
 
+    let reorderResult: { success: boolean; message: string } | undefined;
+    if (data.ordering !== undefined) {
+      reorderResult = await this.reorderCategory(id, data.ordering);
+    }
+
+    const overallSuccess = verified && (reorderResult === undefined || reorderResult.success);
+
     return {
-      success: verified,
-      message: verified ? "Category saved" : (errorMsg ?? successMsg ? "Category save submitted, but updated values were not verified" : "Unknown result"),
+      success: overallSuccess,
+      message: overallSuccess
+        ? "Category saved"
+        : reorderResult && !reorderResult.success
+          ? `Category saved but reorder failed: ${reorderResult.message}`
+          : (errorMsg ?? successMsg ? "Category save submitted, but updated values were not verified" : "Unknown result"),
       data: this.buildOperationData("category", id, {
         title: category.title || String(formData["jform[title]"] || ""),
         state: category.published || String(formData["jform[published]"] || ""),
         verification: {
           ...verification,
           verified,
+          ...(reorderResult !== undefined ? { reorderSuccess: reorderResult.success } : {}),
         },
       }),
       html: result.html,
     };
+  }
+
+  private async reorderCategory(id: string, afterId: string): Promise<{ success: boolean; message: string }> {
+    const listUrl = this.getAdminUrl(
+      "index.php?option=com_categories&view=categories&extension=com_content&limit=500&filter_order=a.lft&filter_order_Dir=asc"
+    );
+    const { html } = await this.getPage(listUrl);
+
+    const $ = this.$c(html);
+    const ids: string[] = [];
+    $("tr").each((_, el) => {
+      const cid = $(el).find("input[name='cid[]']").attr("value");
+      if (cid) ids.push(cid);
+    });
+
+    if (!ids.includes(id)) {
+      return { success: false, message: `Category ${id} not found in list` };
     }
+
+    const withoutTarget = ids.filter((cid) => cid !== id);
+
+    let insertIndex: number;
+    if (afterId === "-1") {
+      insertIndex = 0;
+    } else {
+      const afterIndex = withoutTarget.indexOf(afterId);
+      if (afterIndex === -1) {
+        return { success: false, message: `Sibling category ${afterId} not found` };
+      }
+      insertIndex = afterIndex + 1;
+    }
+
+    const reordered = [...withoutTarget];
+    reordered.splice(insertIndex, 0, id);
+
+    const token = this.extractCsrfToken(html);
+    if (!token) {
+      return { success: false, message: "Failed to extract CSRF token" };
+    }
+
+    const saveUrl = this.getAdminUrl("index.php?option=com_categories&extension=com_content");
+    const formBody = this.getFormUrlEncoded({
+      task: "categories.saveorder",
+      [token.name]: token.value,
+      "cid[]": reordered,
+      "order[]": reordered.map((_, i) => String(i + 1)),
+    });
+
+    const result = await this.request(saveUrl, {
+      method: "POST",
+      body: formBody,
+      contentType: "application/x-www-form-urlencoded",
+    });
+
+    if (result.status === 302 || result.status === 303) {
+      return { success: true, message: "Category reordered" };
+    }
+
+    try {
+      const json = JSON.parse(result.body) as Record<string, unknown>;
+      return {
+        success: json["success"] !== false,
+        message: String(json["message"] || (json["success"] !== false ? "Category reordered" : "Saveorder failed")),
+      };
+    } catch {
+      const errorMsg = this.extractAlertMessage(result.body);
+      return {
+        success: !errorMsg,
+        message: errorMsg || "Category reordered",
+      };
+    }
+  }
 
   private parseCategoryForm(html: string): Record<string, string> {
     const fields = this.extractFormFields(html);
@@ -2743,7 +2839,10 @@ export class JoomlaClient {
   async listModuleTypes(clientId = "0"): Promise<JoomlaResponse> {
     const url = this.getAdminUrl(`index.php?option=com_modules&view=select&client_id=${clientId}`);
     const { html } = await this.getPage(url);
-    const types = this.parseModuleTypes(html);
+    const blacklist = this.config.moduleTypeBlacklist;
+    const types = this.parseModuleTypes(html).filter(
+      (t) => !blacklist || !blacklist.has(t.title.toLowerCase())
+    );
 
     return {
       success: true,
@@ -4143,22 +4242,35 @@ export class JoomlaClient {
   private parseMenuItemList(html: string): Array<Record<string, string>> {
     const $ = this.$c(html);
     const items: Array<Record<string, string>> = [];
+    const ancestorStack: Array<{ id: string; title: string }> = [];
     $("tr").each((_, el) => {
       const $row = $(el);
       const cid = $row.find("input[name='cid[]']").attr("value");
       if (!cid) return;
       const rowText = $row.text();
       if (rowText.includes("JSelect") || rowText.includes("JAll")) return;
-      const title = $row.find("a[href*='task=item.edit']").first().text().trim();
+      const $titleLink = $row.find("a[href*='task=item.edit']").first();
+      const title = $titleLink.text().trim();
       if (!title) return;
       const rowHtml = $.html($row) || "";
       const type = $row.find("div[title] span.small").first().text().trim();
+      // Joomla renders one '–' (en dash) before the title link per depth level
+      const $td = $titleLink.closest("td");
+      const tdHtml = $.html($td) || "";
+      const aIdx = tdHtml.indexOf("<a");
+      const beforeLink = aIdx >= 0 ? tdHtml.substring(0, aIdx) : "";
+      const depth = (beforeLink.match(/–/g) || []).length;
+      while (ancestorStack.length > depth) ancestorStack.pop();
+      const parent = ancestorStack.length > 0 ? ancestorStack[ancestorStack.length - 1] : null;
+      ancestorStack.push({ id: cid, title });
       items.push({
         id: cid,
         title,
         state: this.extractPublishedState(rowHtml),
         type,
         checkedOut: /checked[-_ ]?out|icon-lock|fa-lock/i.test(rowHtml) ? "1" : "0",
+        parentId: parent?.id ?? "",
+        parentTitle: parent ? parent.title : "Root",
       });
     });
     return items;
@@ -4268,6 +4380,7 @@ export class JoomlaClient {
     browserNav?: string;
     home?: string;
     note?: string;
+    templateStyleId?: string;
     request?: Record<string, string>;
     params?: Record<string, string>;
     fieldOverrides?: Record<string, string>;
@@ -4314,6 +4427,7 @@ export class JoomlaClient {
       "jform[browserNav]": data.browserNav || "0",
       "jform[home]": data.home || "0",
       "jform[note]": data.note || "",
+      "jform[template_style_id]": data.templateStyleId || "0",
       [typedToken.name]: typedToken.value,
     };
 
@@ -4389,6 +4503,8 @@ export class JoomlaClient {
       browserNav?: string;
       home?: string;
       note?: string;
+      templateStyleId?: string;
+      ordering?: string;
       request?: Record<string, string>;
       params?: Record<string, string>;
       fieldOverrides?: Record<string, string>;
@@ -4413,9 +4529,28 @@ export class JoomlaClient {
       }
     }
 
+    // When changing type, POST item.setType first so the server returns form HTML with
+    // component_id (and other hidden fields) correctly set for the new type — same as
+    // what the browser's JS does when a user picks a type from the dropdown.
+    let formBaseHtml = html;
+    let effectiveToken = token;
+    if (type) {
+      const setTypeFormData: Record<string, string> = {
+        ...this.extractFormFields(html),
+        task: "item.setType",
+        fieldtype: "type",
+        "jform[type]": type.encoded,
+        "jform[menutype]": data.menuType ?? String(existing.menuType || ""),
+        [token.name]: token.value,
+      };
+      const typedPage = await this.postPage(editUrl, setTypeFormData);
+      formBaseHtml = typedPage.html || html;
+      effectiveToken = this.extractCsrfToken(formBaseHtml) || token;
+    }
+
     const request = { ...((type?.request || existing.request) as Record<string, string>), ...(data.request || {}) };
     const formData: Record<string, string> = {
-      ...this.extractFormFields(html),
+      ...this.extractFormFields(formBaseHtml),
       task: "item.save",
       "jform[title]": data.title ?? String(existing.title || ""),
       "jform[alias]": data.alias ?? String(existing.alias || ""),
@@ -4429,7 +4564,8 @@ export class JoomlaClient {
       "jform[browserNav]": data.browserNav ?? String(existing.browserNav || "0"),
       "jform[home]": data.home ?? String(existing.home || "0"),
       "jform[note]": data.note ?? String(existing.note || ""),
-      [token.name]: token.value,
+      "jform[template_style_id]": data.templateStyleId ?? String(existing.templateStyleId || "0"),
+      [effectiveToken.name]: effectiveToken.value,
     };
 
     for (const [key, value] of Object.entries(request)) {
@@ -4438,6 +4574,10 @@ export class JoomlaClient {
 
     for (const [key, value] of Object.entries(data.params || {})) {
       formData[`jform[params][${key}]`] = value;
+    }
+
+    if (data.ordering !== undefined) {
+      formData["jform[menuordering]"] = data.ordering;
     }
 
     Object.assign(formData, data.fieldOverrides || {});
