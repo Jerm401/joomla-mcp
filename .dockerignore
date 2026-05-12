@@ -1,9 +1,7 @@
 node_modules
-src
 scripts
 snapshots
 blueprints
 docs
 .env
-*.ts
-tsconfig.json
+dist
