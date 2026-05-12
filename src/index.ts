@@ -4,6 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
   ReadResourceRequestSchema,
   InitializeRequestSchema,
   JSONRPCResponse,
@@ -1365,6 +1366,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           isLoggedIn = false;
         }
         const result = await ensureLoggedIn();
+        const cfg = joomla.getConfig();
+        if (result.success) {
+          result.data = { ...((result.data as object) ?? {}), activeSite: cfg.baseUrl, username: cfg.username };
+        }
         return {
           content: [{ type: "text", text: formatResult(result) }],
           isError: !result.success,
@@ -2351,6 +2356,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
 });
 
   const DOCS_DIR = path.join(process.cwd(), "docs", "agents");
+
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => {
+    return { resourceTemplates: [] };
+  });
 
   server.setRequestHandler(ListResourcesRequestSchema, async () => {
     const files = fs.existsSync(DOCS_DIR)
