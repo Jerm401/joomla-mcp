@@ -2455,7 +2455,8 @@ async function startHttp(port: number): Promise<void> {
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 async function main() {
-  const httpPort = process.env.HTTP_PORT ? parseInt(process.env.HTTP_PORT, 10) : null;
+  const rawPort = process.env.HTTP_PORT || process.env.PORT;
+  const httpPort = rawPort ? parseInt(rawPort, 10) : null;
 
   if (httpPort) {
     await startHttp(httpPort);
