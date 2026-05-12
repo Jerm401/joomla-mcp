@@ -2397,15 +2397,18 @@ async function startHttp(port: number): Promise<void> {
   const sessions = new Map<string, StreamableHTTPServerTransport>();
 
   const httpServer = http.createServer(async (req, res) => {
+    const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host}`);
     const auth = req.headers["authorization"] ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const headerToken = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    const queryToken = reqUrl.searchParams.get("token") ?? "";
+    const token = headerToken || queryToken;
     if (!token || !validTokens.has(token)) {
       res.writeHead(401, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Unauthorized" }));
       return;
     }
 
-    const urlPath = req.url?.split("?")[0];
+    const urlPath = reqUrl.pathname;
     if (urlPath !== "/mcp") {
       res.writeHead(404);
       res.end("Not found");
