@@ -7,6 +7,9 @@ import {
   JSONRPCResponse,
 } from "@modelcontextprotocol/sdk/types.js";
 import { JoomlaClient, JoomlaResponse } from "./joomla-client.js";
+import http from "node:http";
+import { randomUUID } from "node:crypto";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 // Load config from environment
 const config = {
@@ -20,33 +23,6 @@ const config = {
       .filter(Boolean)
   ),
 };
-
-// Create Joomla client instance
-const joomla = new JoomlaClient(config);
-let isLoggedIn = false;
-
-// Ensure logged in before operations
-async function ensureLoggedIn(): Promise<JoomlaResponse> {
-  if (isLoggedIn) {
-    // Verify session is still valid
-    const stillLoggedIn = await joomla.isLoggedIn();
-    if (stillLoggedIn) return { success: true, message: "Already logged in" };
-    isLoggedIn = false;
-  }
-
-  if (!config.username || !config.password) {
-    return {
-      success: false,
-      message: "Joomla credentials not configured. Set JOOMLA_USERNAME and JOOMLA_PASSWORD in .env file.",
-    };
-  }
-
-  const result = await joomla.login();
-  if (result.success) {
-    isLoggedIn = true;
-  }
-  return result;
-}
 
 // Format response for LLM consumption
 function formatResult(response: JoomlaResponse): string {
@@ -66,8 +42,32 @@ function formatResult(response: JoomlaResponse): string {
   return JSON.stringify(result, null, 2);
 }
 
-// Create MCP server
-const server = new Server(
+function buildServer(joomla: JoomlaClient): Server {
+  let isLoggedIn = false;
+
+  async function ensureLoggedIn(): Promise<JoomlaResponse> {
+    if (isLoggedIn) {
+      const stillLoggedIn = await joomla.isLoggedIn();
+      if (stillLoggedIn) return { success: true, message: "Already logged in" };
+      isLoggedIn = false;
+    }
+
+    if (!config.username || !config.password) {
+      return {
+        success: false,
+        message: "Joomla credentials not configured. Set JOOMLA_USERNAME and JOOMLA_PASSWORD in .env file.",
+      };
+    }
+
+    const result = await joomla.login();
+    if (result.success) {
+      isLoggedIn = true;
+    }
+    return result;
+  }
+
+  // Create MCP server
+  const server = new Server(
   {
     name: "joomla-mcp",
     version: "1.0.0",
@@ -84,20 +84,29 @@ const tools = [
   {
     name: "joomla_login",
     description:
-      "Log in to the Joomla admin backend. Returns success if authentication works. Credentials must be set in .env file (JOOMLA_USERNAME, JOOMLA_PASSWORD).",
+      "Log in to the Joomla admin backend. Optionally provide site_url to target a specific client site — call this first when switching between sites. Server-side credentials (JOOMLA_USERNAME, JOOMLA_PASSWORD) are reused; only the site URL changes per session.",
     inputSchema: {
       type: "object",
-      properties: {},
+      properties: {
+        site_url: {
+          type: "string",
+          description: "Target Joomla site URL (e.g. https://client-site.com or https://client-site.com/administrator). Switches this session to the specified site. Uses JOOMLA_BASE_URL env var if omitted.",
+        },
+      },
       required: [],
     },
   },
   {
     name: "joomla_list_articles",
     description:
-      "List articles in Joomla admin. Optionally filter by category_id (number) or state ('0'=unpublished,'1'=published,'-2'=trashed,'2'=archived). Returns array of articles with id, title, state, category. Results are paginated — use 'page' to fetch additional pages (1-based). Default limit is 200 per page.",
+      "List articles in Joomla admin. If you know the article name, always provide the 'search' parameter — it sends a server-side filter and avoids fetching all articles. Optionally filter by category_id or state. Returns array of articles with id, title, state, category. Results are paginated — use 'page' to fetch additional pages (1-based). Default limit is 200 per page.",
     inputSchema: {
       type: "object",
       properties: {
+        search: {
+          type: "string",
+          description: "Filter articles whose title contains this text (server-side search). Use this whenever you know the article name to avoid fetching all articles.",
+        },
         category_id: {
           type: "string",
           description: "Filter by category ID number",
@@ -122,16 +131,20 @@ const tools = [
   {
     name: "joomla_get_article",
     description:
-      "Get full details of a specific article by ID. Returns title, alias, categoryId, content (full article HTML), state, access, introImage, introImageAlt, featuredImage, featuredImageAlt, and other fields.",
+      "Get a specific article by id, or search by title. If title matches multiple articles, returns a summary list — then call again with the correct id. Returns title, alias, categoryId, content (full article HTML), state, access, introImage, featuredImage, and other fields.",
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "The article ID number",
+          description: "Article ID for a direct lookup.",
+        },
+        title: {
+          type: "string",
+          description: "Search by title instead of ID. Returns the article directly if title is unique, or a list of matches to disambiguate.",
         },
       },
-      required: ["id"],
+      required: [],
     },
   },
   {
@@ -283,10 +296,14 @@ const tools = [
   {
     name: "joomla_list_categories",
     description:
-      "List content categories. Returns array with id, title, state for each category. Optional extension parameter defaults to com_content. Results are paginated — use 'page' to fetch additional pages (1-based). Default limit is 200 per page.",
+      "List content categories. If you know the category name, use the 'search' parameter for a targeted server-side filter. Returns array with id, title, state for each category. Optional extension parameter defaults to com_content. Results are paginated — use 'page' to fetch additional pages (1-based). Default limit is 200 per page.",
     inputSchema: {
       type: "object",
       properties: {
+        search: {
+          type: "string",
+          description: "Filter categories whose title contains this text (server-side search).",
+        },
         extension: {
           type: "string",
           description: "Component extension (default: com_content)",
@@ -306,16 +323,20 @@ const tools = [
   {
     name: "joomla_get_category",
     description:
-      "Get full details of a specific category by ID. Returns title, alias, parentId, description, published state.",
+      "Get a specific category by id, or search by title. If title matches multiple categories, returns a summary list — then call again with the correct id. Returns title, alias, parentId, description, published state.",
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "The category ID number",
+          description: "Category ID for a direct lookup.",
+        },
+        title: {
+          type: "string",
+          description: "Search by title instead of ID. Returns the category directly if title is unique, or a list of matches to disambiguate.",
         },
       },
-      required: ["id"],
+      required: [],
     },
   },
   {
@@ -431,13 +452,25 @@ const tools = [
   {
     name: "joomla_list_modules",
     description:
-      "List all modules. Optional clientId parameter: '0'=site modules, '1'=admin modules. Returns array with id, title, state, position, enabled status.",
+      "List modules. If you know the module name, use the 'search' parameter for a targeted server-side filter. Optional client_id: '0'=site modules, '1'=admin modules. Supports pagination with 'limit' and 'page'. Returns array with id, title, state, position, enabled status.",
     inputSchema: {
       type: "object",
       properties: {
+        search: {
+          type: "string",
+          description: "Filter modules whose title contains this text (server-side search). Use whenever you know the module name.",
+        },
         client_id: {
           type: "string",
           description: "Client ID: 0=site, 1=admin (default: 0)",
+        },
+        limit: {
+          type: "number",
+          description: "Number of modules per page (default: 200, max: 500)",
+        },
+        page: {
+          type: "number",
+          description: "Page number to retrieve, 1-based (default: 1)",
         },
       },
       required: [],
@@ -495,16 +528,24 @@ const tools = [
   {
     name: "joomla_get_module",
     description:
-      "Get full details of a specific module by ID. Returns title, position, published, access, moduleType, showtitle, ordering, style.",
+      "Get a specific module by id, or search by title. If title matches multiple modules, returns a summary list — then call again with the correct id. Returns title, position, published, access, moduleType, showtitle, ordering, style.",
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "The module ID number",
+          description: "Module ID for a direct lookup.",
+        },
+        title: {
+          type: "string",
+          description: "Search by title instead of ID. Returns the module directly if title is unique, or a list of matches to disambiguate.",
+        },
+        client_id: {
+          type: "string",
+          description: "Scope title search to site (0) or admin (1) modules (default: 0).",
         },
       },
-      required: ["id"],
+      required: [],
     },
   },
   {
@@ -712,13 +753,25 @@ const tools = [
   {
     name: "joomla_list_menu_items",
     description:
-      "List menu items for a specific menu. Requires menuId, which should be the menuType returned by joomla_list_menus (for example 'mainmenu'). Returns array of menu items, each with parentId and parentTitle (parentTitle is 'Root' for top-level items with no parent).",
+      "List menu items for a specific menu. Requires menuId, which should be the menuType returned by joomla_list_menus (for example 'mainmenu'). If you know the item name, use the 'search' parameter for a targeted server-side filter. Returns array of menu items, each with parentId and parentTitle (parentTitle is 'Root' for top-level items with no parent).",
     inputSchema: {
       type: "object",
       properties: {
         menuId: {
           type: "string",
           description: "Menu ID or type identifier",
+        },
+        search: {
+          type: "string",
+          description: "Filter menu items whose title contains this text (server-side search).",
+        },
+        limit: {
+          type: "number",
+          description: "Items per page (default: 0 = all, max 500)",
+        },
+        page: {
+          type: "number",
+          description: "Page number, 1-based (default: 1)",
         },
       },
       required: ["menuId"],
@@ -752,16 +805,24 @@ const tools = [
   {
     name: "joomla_get_menu_item",
     description:
-      "Get full editable details for a menu item by ID, including request and params fields.",
+      "Get full editable details for a menu item. Provide id for a direct lookup, or title to search by name (optionally scoped to a menuId). If title matches multiple items, returns a summary list — then call again with the correct id. Returns request and params fields.",
     inputSchema: {
       type: "object",
       properties: {
         id: {
           type: "string",
-          description: "Menu item ID",
+          description: "Menu item ID for a direct lookup.",
+        },
+        title: {
+          type: "string",
+          description: "Search by title instead of id. Returns full details if unique, or a list of matches to disambiguate.",
+        },
+        menuId: {
+          type: "string",
+          description: "Optional: scope title search to a specific menu (menuType, e.g. 'mainmenu'). Without this, searches across all menus.",
         },
       },
-      required: ["id"],
+      required: [],
     },
   },
   {
@@ -1185,6 +1246,21 @@ const tools = [
     },
   },
   {
+    name: "joomla_get_frontend_page",
+    description:
+      "Fetch a public frontend page and extract structured info: pageTitle, cleanTitle (site name suffix stripped), h1, metaDescription, canonicalUrl. Use this when given a frontend URL or page title to identify the matching Joomla article — then pass cleanTitle to joomla_get_article or joomla_list_articles with the search parameter.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Frontend path (e.g. '/about-us') or full URL (e.g. 'https://example.com/contact')",
+        },
+      },
+      required: ["path"],
+    },
+  },
+  {
     name: "joomla_page_content",
     description:
       "Get raw HTML content of any admin page for debugging or exploration. Use the admin path like 'index.php?option=com_content&view=articles'.",
@@ -1214,6 +1290,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
   try {
     switch (name) {
       case "joomla_login": {
+        const siteUrl = args?.site_url as string | undefined;
+        if (siteUrl) {
+          joomla.switchSite(siteUrl);
+          isLoggedIn = false;
+        }
         const result = await ensureLoggedIn();
         return {
           content: [{ type: "text", text: formatResult(result) }],
@@ -1229,7 +1310,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           (args?.category_id as string) || undefined,
           (args?.state as string) || undefined,
           (args?.limit as number) || undefined,
-          (args?.page as number) || undefined
+          (args?.page as number) || undefined,
+          (args?.search as string) || undefined,
         );
         return {
           content: [{ type: "text", text: formatResult(result) }],
@@ -1241,10 +1323,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
 
-        const id = args?.id as string;
-        if (!id) return { content: [{ type: "text", text: "Error: id is required" }], isError: true };
-
-        const result = await joomla.getArticle(id);
+        const result = await joomla.getArticle(
+          (args?.id as string) || undefined,
+          (args?.title as string) || undefined,
+        );
         return {
           content: [{ type: "text", text: formatResult(result) }],
           isError: !result.success,
@@ -1343,7 +1425,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const result = await joomla.listCategories(
           args?.extension as string,
           (args?.limit as number) || undefined,
-          (args?.page as number) || undefined
+          (args?.page as number) || undefined,
+          (args?.search as string) || undefined,
         );
         return {
           content: [{ type: "text", text: formatResult(result) }],
@@ -1355,10 +1438,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
 
-        const id = args?.id as string;
-        if (!id) return { content: [{ type: "text", text: "Error: id is required" }], isError: true };
-
-        const result = await joomla.getCategory(id);
+        const result = await joomla.getCategory(
+          (args?.id as string) || undefined,
+          (args?.title as string) || undefined,
+        );
         return {
           content: [{ type: "text", text: formatResult(result) }],
           isError: !result.success,
@@ -1443,7 +1526,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
 
-        const result = await joomla.listModules(args?.client_id as string);
+        const result = await joomla.listModules(
+          args?.client_id as string,
+          (args?.search as string) || undefined,
+          (args?.limit as number) || undefined,
+          (args?.page as number) || undefined,
+        );
         return {
           content: [{ type: "text", text: formatResult(result) }],
           isError: !result.success,
@@ -1490,10 +1578,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
 
-        const id = args?.id as string;
-        if (!id) return { content: [{ type: "text", text: "Error: id is required" }], isError: true };
-
-        const result = await joomla.getModule(id);
+        const result = await joomla.getModule(
+          (args?.id as string) || undefined,
+          (args?.title as string) || undefined,
+          (args?.client_id as string) || "0",
+        );
         return {
           content: [{ type: "text", text: formatResult(result) }],
           isError: !result.success,
@@ -1702,7 +1791,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const menuId = args?.menuId as string;
         if (!menuId) return { content: [{ type: "text", text: "Error: menuId is required" }], isError: true };
 
-        const result = await joomla.listMenuItems(menuId);
+        const result = await joomla.listMenuItems(
+          menuId,
+          (args?.search as string) || undefined,
+          (args?.limit as number) || undefined,
+          (args?.page as number) || undefined,
+        );
         return {
           content: [{ type: "text", text: formatResult(result) }],
           isError: !result.success,
@@ -1738,10 +1832,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
 
-        const id = args?.id as string;
-        if (!id) return { content: [{ type: "text", text: "Error: id is required" }], isError: true };
-
-        const result = await joomla.getMenuItem(id);
+        const result = await joomla.getMenuItem(
+          (args?.id as string) || undefined,
+          (args?.title as string) || undefined,
+          (args?.menuId as string) || undefined,
+        );
         return {
           content: [{ type: "text", text: formatResult(result) }],
           isError: !result.success,
@@ -2093,6 +2188,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
       }
 
+      case "joomla_get_frontend_page": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+
+        const path = args?.path as string;
+        if (!path) return { content: [{ type: "text", text: "Error: path is required" }], isError: true };
+
+        const result = await joomla.getFrontendPageInfo(path);
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
       case "joomla_page_content": {
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
@@ -2126,13 +2232,92 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
   }
 });
 
-// Start server with stdio transport
+  return server;
+}
+
+async function startHttp(port: number): Promise<void> {
+  const validTokens = new Set(
+    Object.entries(process.env)
+      .filter(([k]) => k.startsWith("MCP_TOKEN_"))
+      .map(([, v]) => v as string)
+      .filter(Boolean)
+  );
+
+  if (validTokens.size === 0) {
+    console.error("WARNING: No MCP_TOKEN_* env vars found. All HTTP requests will be rejected.");
+  } else {
+    console.error(`Team access configured for ${validTokens.size} member(s).`);
+  }
+
+  const sessions = new Map<string, StreamableHTTPServerTransport>();
+
+  const httpServer = http.createServer(async (req, res) => {
+    const auth = req.headers["authorization"] ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+    if (!token || !validTokens.has(token)) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "Unauthorized" }));
+      return;
+    }
+
+    const urlPath = req.url?.split("?")[0];
+    if (urlPath !== "/mcp") {
+      res.writeHead(404);
+      res.end("Not found");
+      return;
+    }
+
+    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    let transport = sessionId ? sessions.get(sessionId) : undefined;
+
+    if (!transport) {
+      const joomlaClient = new JoomlaClient(config);
+      const mcpServer = buildServer(joomlaClient);
+      transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: () => randomUUID(),
+        onsessioninitialized: (id) => {
+          sessions.set(id, transport!);
+        },
+      });
+      await mcpServer.connect(transport);
+    }
+
+    let body: unknown;
+    if (req.method === "POST") {
+      body = await new Promise((resolve, reject) => {
+        let data = "";
+        req.on("data", (chunk: Buffer) => (data += chunk.toString()));
+        req.on("end", () => {
+          try { resolve(JSON.parse(data)); } catch { resolve(undefined); }
+        });
+        req.on("error", reject);
+      });
+    }
+
+    await transport.handleRequest(req, res, body);
+    if (req.method === "DELETE" && sessionId) {
+      sessions.delete(sessionId);
+    }
+  });
+
+  await new Promise<void>((resolve) => httpServer.listen(port, resolve));
+  console.error(`Joomla MCP Server running on HTTP port ${port}`);
+}
+
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 
 async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-  console.error("Joomla MCP Server running on stdio");
+  const httpPort = process.env.HTTP_PORT ? parseInt(process.env.HTTP_PORT, 10) : null;
+
+  if (httpPort) {
+    await startHttp(httpPort);
+  } else {
+    const joomlaClient = new JoomlaClient(config);
+    const mcpServer = buildServer(joomlaClient);
+    const transport = new StdioServerTransport();
+    await mcpServer.connect(transport);
+    console.error("Joomla MCP Server running on stdio");
+  }
 }
 
 main().catch((error) => {

@@ -142,6 +142,15 @@ export class JoomlaClient {
     return { ...this.config };
   }
 
+  switchSite(url: string): void {
+    this.config.baseUrl = url;
+    this.cookies.clear();
+    this.tokenName = null;
+    this.gantryEntryUrl = null;
+    this.gantryOutlineLayoutUrls.clear();
+    this.gantryLayoutRootCache.clear();
+  }
+
   private getAdminUrl(path = ""): string {
     const siteBase = this.config.baseUrl.replace(/\/+$/, "");
     const base = /\/administrator$/i.test(siteBase) ? siteBase : `${siteBase}/administrator`;
@@ -1347,6 +1356,32 @@ export class JoomlaClient {
     return this.parseCategoryList(html);
   }
 
+  private async searchModulesByTitle(title: string, clientId = "0"): Promise<Array<Record<string, string>>> {
+    const params = new URLSearchParams({
+      "option": "com_modules",
+      "view": "modules",
+      "client_id": clientId,
+      "filter[search]": title,
+      "limit": "50",
+    });
+    const url = this.getAdminUrl(`index.php?${params.toString()}`);
+    const { html } = await this.getPage(url);
+    return this.parseModuleList(html);
+  }
+
+  private async searchMenuItemsByTitle(title: string, menuId?: string): Promise<Array<Record<string, string>>> {
+    const params = new URLSearchParams({
+      "option": "com_menus",
+      "view": "items",
+      "filter[search]": title,
+      "limit": "50",
+    });
+    if (menuId) params.set("menutype", menuId);
+    const url = this.getAdminUrl(`index.php?${params.toString()}`);
+    const { html } = await this.getPage(url);
+    return this.parseMenuItemList(html);
+  }
+
   private async findCategoryByTitle(title: string): Promise<Record<string, string> | null> {
     const categories = await this.searchCategoriesByTitle(title);
     return categories.find((category) => category.title === title) || null;
@@ -1872,7 +1907,7 @@ export class JoomlaClient {
 
   // ==================== ARTICLES ====================
 
-  async listArticles(categoryId?: string, state?: string, limit?: number, page?: number): Promise<JoomlaResponse> {
+  async listArticles(categoryId?: string, state?: string, limit?: number, page?: number, search?: string): Promise<JoomlaResponse> {
     const effectiveLimit = Math.min(limit ?? 200, 500);
     const effectivePage = Math.max(page ?? 1, 1);
     const limitStart = (effectivePage - 1) * effectiveLimit;
@@ -1884,12 +1919,13 @@ export class JoomlaClient {
     });
     if (categoryId) params.set("filter[category_id]", categoryId);
     if (state !== undefined && state !== "") params.set("filter[published]", state);
+    if (search) params.set("filter[search]", search);
     const url = this.getAdminUrl(`index.php?${params.toString()}`);
     const { html } = await this.getPage(url);
     const articles = this.parseArticleList(html);
     return {
       success: true,
-      message: `Found ${articles.length} articles (page ${effectivePage}, limit ${effectiveLimit})`,
+      message: `Found ${articles.length} articles (page ${effectivePage}, limit ${effectiveLimit}${search ? `, search="${search}"` : ""})`,
       data: articles,
       html,
     };
@@ -1944,10 +1980,17 @@ export class JoomlaClient {
     };
   }
 
-  async getArticle(id: string): Promise<JoomlaResponse> {
-    const result = await this.fetchArticleForm(id);
+  async getArticle(id?: string, title?: string): Promise<JoomlaResponse> {
+    if (!id && !title) return { success: false, message: "Either id or title is required" };
+    if (!id && title) {
+      const matches = await this.searchArticlesByTitle(title);
+      if (matches.length === 0) return { success: false, message: `No article found matching title '${title}'` };
+      if (matches.length === 1) return this.getArticle(matches[0].id);
+      return { success: true, message: `Multiple articles found for '${title}' — provide id to get full details`, data: matches };
+    }
+    const result = await this.fetchArticleForm(id!);
     if (result.success) {
-      const ci = await this.checkInArticle(id);
+      const ci = await this.checkInArticle(id!);
       if (!ci.success) {
         result.message = (result.message ?? "") + " (warning: auto-checkin failed)";
       }
@@ -2248,9 +2291,10 @@ export class JoomlaClient {
 
   // ==================== CATEGORIES ====================
 
-  async listCategories(extension = "com_content", limit = 200, page = 1): Promise<JoomlaResponse> {
+  async listCategories(extension = "com_content", limit = 200, page = 1, search?: string): Promise<JoomlaResponse> {
     const effectiveLimit = Math.min(limit, 500);
-    const limitStart = (Math.max(page, 1) - 1) * effectiveLimit;
+    const effectivePage = Math.max(page, 1);
+    const limitStart = (effectivePage - 1) * effectiveLimit;
     const params = new URLSearchParams({
       "option": "com_categories",
       "view": "categories",
@@ -2258,12 +2302,13 @@ export class JoomlaClient {
       "limit": String(effectiveLimit),
       "limitstart": String(limitStart),
     });
+    if (search) params.set("filter[search]", search);
     const url = this.getAdminUrl(`index.php?${params.toString()}`);
     const { html } = await this.getPage(url);
     const categories = this.parseCategoryList(html);
     return {
       success: true,
-      message: `Found ${categories.length} categories (page ${Math.max(page, 1)}, limit ${effectiveLimit})`,
+      message: `Found ${categories.length} categories (page ${effectivePage}, limit ${effectiveLimit}${search ? `, search="${search}"` : ""})`,
       data: categories,
       html,
     };
@@ -2312,10 +2357,17 @@ export class JoomlaClient {
     };
   }
 
-  async getCategory(id: string): Promise<JoomlaResponse> {
-    const result = await this.fetchCategoryForm(id);
+  async getCategory(id?: string, title?: string): Promise<JoomlaResponse> {
+    if (!id && !title) return { success: false, message: "Either id or title is required" };
+    if (!id && title) {
+      const matches = await this.searchCategoriesByTitle(title);
+      if (matches.length === 0) return { success: false, message: `No category found matching title '${title}'` };
+      if (matches.length === 1) return this.getCategory(matches[0].id);
+      return { success: true, message: `Multiple categories found for '${title}' — provide id to get full details`, data: matches };
+    }
+    const result = await this.fetchCategoryForm(id!);
     if (result.success) {
-      const ci = await this.checkInCategory(id);
+      const ci = await this.checkInCategory(id!);
       if (!ci.success) {
         result.message = (result.message ?? "") + " (warning: auto-checkin failed)";
       }
@@ -2656,13 +2708,24 @@ export class JoomlaClient {
 
   // ==================== MODULES ====================
 
-  async listModules(clientId = "0"): Promise<JoomlaResponse> {
-    const url = this.getAdminUrl(`index.php?option=com_modules&view=modules&client_id=${clientId}`);
+  async listModules(clientId = "0", search?: string, limit?: number, page?: number): Promise<JoomlaResponse> {
+    const effectiveLimit = Math.min(limit ?? 200, 500);
+    const effectivePage = Math.max(page ?? 1, 1);
+    const limitStart = (effectivePage - 1) * effectiveLimit;
+    const params = new URLSearchParams({
+      "option": "com_modules",
+      "view": "modules",
+      "client_id": clientId,
+      "limit": String(effectiveLimit),
+      "limitstart": String(limitStart),
+    });
+    if (search) params.set("filter[search]", search);
+    const url = this.getAdminUrl(`index.php?${params.toString()}`);
     const { html } = await this.getPage(url);
     const modules = this.parseModuleList(html);
     return {
       success: true,
-      message: `Found ${modules.length} modules`,
+      message: `Found ${modules.length} modules (page ${effectivePage}, limit ${effectiveLimit}${search ? `, search="${search}"` : ""})`,
       data: modules,
       html,
     };
@@ -2923,10 +2986,17 @@ export class JoomlaClient {
     };
   }
 
-  async getModule(id: string): Promise<JoomlaResponse> {
-    const result = await this.fetchModuleForm(id);
+  async getModule(id?: string, title?: string, clientId = "0"): Promise<JoomlaResponse> {
+    if (!id && !title) return { success: false, message: "Either id or title is required" };
+    if (!id && title) {
+      const matches = await this.searchModulesByTitle(title, clientId);
+      if (matches.length === 0) return { success: false, message: `No module found matching title '${title}'` };
+      if (matches.length === 1) return this.getModule(matches[0].id);
+      return { success: true, message: `Multiple modules found for '${title}' — provide id to get full details`, data: matches };
+    }
+    const result = await this.fetchModuleForm(id!);
     if (result.success) {
-      const ci = await this.checkInModule(id);
+      const ci = await this.checkInModule(id!);
       if (!ci.success) {
         result.message = (result.message ?? "") + " (warning: auto-checkin failed)";
       }
@@ -4276,13 +4346,24 @@ export class JoomlaClient {
     return items;
   }
 
-  async listMenuItems(menuId: string): Promise<JoomlaResponse> {
-    const url = this.getAdminUrl(`index.php?option=com_menus&view=items&menutype=${menuId}&limit=0`);
+  async listMenuItems(menuId: string, search?: string, limit?: number, page?: number): Promise<JoomlaResponse> {
+    const effectiveLimit = limit != null ? Math.min(limit, 500) : 0;
+    const effectivePage = Math.max(page ?? 1, 1);
+    const limitStart = effectiveLimit > 0 ? (effectivePage - 1) * effectiveLimit : 0;
+    const params = new URLSearchParams({
+      "option": "com_menus",
+      "view": "items",
+      "menutype": menuId,
+      "limit": String(effectiveLimit),
+      "limitstart": String(limitStart),
+    });
+    if (search) params.set("filter[search]", search);
+    const url = this.getAdminUrl(`index.php?${params.toString()}`);
     const { html } = await this.getPage(url);
     const items = this.parseMenuItemList(html);
     return {
       success: true,
-      message: `Found ${items.length} menu items`,
+      message: `Found ${items.length} menu items${search ? `, search="${search}"` : ""}`,
       data: items,
       html,
     };
@@ -4314,10 +4395,17 @@ export class JoomlaClient {
     };
   }
 
-  async getMenuItem(id: string): Promise<JoomlaResponse> {
-    const result = await this.fetchMenuItemForm(id);
+  async getMenuItem(id?: string, title?: string, menuId?: string): Promise<JoomlaResponse> {
+    if (!id && !title) return { success: false, message: "Either id or title is required" };
+    if (!id && title) {
+      const matches = await this.searchMenuItemsByTitle(title, menuId);
+      if (matches.length === 0) return { success: false, message: `No menu item found matching title '${title}'` };
+      if (matches.length === 1) return this.getMenuItem(matches[0].id);
+      return { success: true, message: `Multiple menu items found for '${title}' — provide id to get full details`, data: matches };
+    }
+    const result = await this.fetchMenuItemForm(id!);
     if (result.success) {
-      const ci = await this.checkInMenuItem(id);
+      const ci = await this.checkInMenuItem(id!);
       if (!ci.success) {
         result.message = (result.message ?? "") + " (warning: auto-checkin failed)";
       }
@@ -4802,6 +4890,38 @@ export class JoomlaClient {
       success: true,
       message: "Page retrieved",
       html: html.substring(0, 50000),
+    };
+  }
+
+  async getFrontendPageInfo(path: string): Promise<JoomlaResponse> {
+    const url = path.startsWith("http")
+      ? path
+      : path.startsWith("/")
+        ? `${this.getBaseUrl()}${path}`
+        : `${this.getBaseUrl()}/${path}`;
+
+    const response = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; JoomlaMCP/1.0)" },
+      redirect: "follow",
+    });
+    if (!response.ok) {
+      return { success: false, message: `HTTP ${response.status} fetching ${url}` };
+    }
+    const html = await response.text();
+    const $ = cheerioLoad(html);
+    const pageTitle = $("title").first().text().trim();
+    const h1 = $("h1").first().text().trim();
+    const metaDescription = $("meta[name='description']").attr("content")?.trim() ?? "";
+    const canonicalUrl = $("link[rel='canonical']").attr("href")?.trim() ?? url;
+    const siteName = $("meta[property='og:site_name']").attr("content")?.trim() ?? "";
+    const cleanTitle = siteName && pageTitle.endsWith(` - ${siteName}`)
+      ? pageTitle.slice(0, -(` - ${siteName}`).length).trim()
+      : pageTitle;
+
+    return {
+      success: true,
+      message: `Frontend page retrieved: ${url}`,
+      data: { url, pageTitle, cleanTitle, h1, metaDescription, canonicalUrl },
     };
   }
 

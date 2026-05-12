@@ -14,12 +14,15 @@
     "test:tools:gantry": "npm run build && cross-env TEST_SUITE=gantry tsx scripts/tests/mcp-all-tools-test.ts",
     "test:tools:menus": "npm run build && cross-env TEST_SUITE=menus tsx scripts/tests/mcp-all-tools-test.ts",
     "test:tools:admin": "npm run build && cross-env TEST_SUITE=admin tsx scripts/tests/mcp-all-tools-test.ts",
-    "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts"
+    "inspect": "npx @modelcontextprotocol/inspector tsx src/index.ts",
+    "start:http": "cross-env HTTP_PORT=3000 tsx src/index.ts"
   },
   "dependencies": {
+    "@hono/node-server": "^2.0.2",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "cheerio": "^1.2.0",
     "dotenv": "^17.4.2",
+    "hono": "^4.12.18",
     "js-yaml": "^4.1.1"
   },
   "devDependencies": {
