@@ -1306,6 +1306,67 @@ const tools = [
     },
   },
   {
+    name: "joomla_media_delete",
+    description: "Delete a file or folder from the Joomla Media Manager. Defaults to dry-run unless confirm=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Path to the file or folder relative to the media root (e.g. 'template/test/image.png' or 'template/test').",
+        },
+        type: {
+          type: "string",
+          enum: ["file", "folder"],
+          description: "Whether to delete a file or folder. Defaults to 'file'.",
+        },
+        dryRun: { type: "boolean" },
+        confirm: { type: "boolean" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "joomla_media_rename",
+    description: "Rename a file in the Joomla Media Manager (uploads copy with new name, then deletes original). Defaults to dry-run unless confirm=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Current path of the file relative to media root (e.g. 'template/test/old-name.png').",
+        },
+        newName: {
+          type: "string",
+          description: "New filename including extension (e.g. 'new-name.png').",
+        },
+        dryRun: { type: "boolean" },
+        confirm: { type: "boolean" },
+      },
+      required: ["path", "newName"],
+    },
+  },
+  {
+    name: "joomla_media_move",
+    description: "Move a file to a different folder in the Joomla Media Manager (uploads to target folder, then deletes from source). Defaults to dry-run unless confirm=true.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Current path of the file relative to media root (e.g. 'template/test/image.png').",
+        },
+        targetFolder: {
+          type: "string",
+          description: "Destination folder relative to media root (e.g. 'template/logos'). Use empty string for the root.",
+        },
+        dryRun: { type: "boolean" },
+        confirm: { type: "boolean" },
+      },
+      required: ["path", "targetFolder"],
+    },
+  },
+  {
     name: "joomla_sponsors_list",
     description: "Inspect the Sponsors component list page.",
     inputSchema: { type: "object", properties: {} },
@@ -2323,6 +2384,52 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           base64Content: args?.base64Content as string,
           fileName: args?.fileName as string,
           folder: args?.folder as string,
+          dryRun: args?.dryRun as boolean,
+          confirm: args?.confirm as boolean,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_media_delete": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const path = args?.path as string;
+        if (!path) return { content: [{ type: "text", text: "Error: path is required" }], isError: true };
+        const result = await joomla.deleteMedia({
+          path,
+          type: args?.type as "file" | "folder",
+          dryRun: args?.dryRun as boolean,
+          confirm: args?.confirm as boolean,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_media_rename": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const path = args?.path as string;
+        const newName = args?.newName as string;
+        if (!path) return { content: [{ type: "text", text: "Error: path is required" }], isError: true };
+        if (!newName) return { content: [{ type: "text", text: "Error: newName is required" }], isError: true };
+        const result = await joomla.renameMediaFile({
+          path,
+          newName,
+          dryRun: args?.dryRun as boolean,
+          confirm: args?.confirm as boolean,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_media_move": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const path = args?.path as string;
+        const targetFolder = args?.targetFolder as string;
+        if (!path) return { content: [{ type: "text", text: "Error: path is required" }], isError: true };
+        if (targetFolder === undefined) return { content: [{ type: "text", text: "Error: targetFolder is required" }], isError: true };
+        const result = await joomla.moveMediaFile({
+          path,
+          targetFolder,
           dryRun: args?.dryRun as boolean,
           confirm: args?.confirm as boolean,
         });

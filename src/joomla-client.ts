@@ -1756,16 +1756,38 @@ export class JoomlaClient {
       .filter((f) => f.src && !/media\/system|jui\/img|alpha\.png|administrator\/templates/i.test(f.src))
       .slice(0, 200);
 
+    // Parse subfolders from imagesList: <a href="...&folder=child"> links that are direct children
+    const currentFolderDecoded = decodeURIComponent(folderParam);
+    const seenPaths = new Set<string>();
+    const subfolders: Array<{ label: string; href: string; path: string }> = [];
+    $list("a[href*='folder=']").each((_, el) => {
+      const href = $list(el).attr("href") || "";
+      const fm = href.match(/[?&]folder=([^&]+)/);
+      if (!fm) return;
+      const linkedPath = decodeURIComponent(fm[1]);
+      const expectedPrefix = currentFolderDecoded ? currentFolderDecoded + "/" : "";
+      if (expectedPrefix) {
+        if (!linkedPath.startsWith(expectedPrefix)) return;
+        if (linkedPath.slice(expectedPrefix.length).includes("/")) return;
+      } else {
+        if (linkedPath.includes("/")) return;
+      }
+      if (seenPaths.has(linkedPath)) return;
+      seenPaths.add(linkedPath);
+      const name = linkedPath.split("/").pop() || linkedPath;
+      subfolders.push({ label: name, href, path: linkedPath });
+    });
+
     return {
       success: true,
-      message: files.length > 0
-        ? `Found ${files.length} file(s) in folder "${decodeURIComponent(folderParam) || "root"}"`
-        : `No files found in folder "${decodeURIComponent(folderParam) || "root"}" (${links.length} subfolders available)`,
+      message: files.length > 0 || subfolders.length > 0
+        ? `Found ${files.length} file(s) and ${subfolders.length} subfolder(s) in "${currentFolderDecoded || "root"}"`
+        : `No files or subfolders found in "${currentFolderDecoded || "root"}"`,
       data: {
         path: pathValue,
-        folder: decodeURIComponent(folderParam) || "root",
+        folder: currentFolderDecoded || "root",
         files,
-        subfolders: links,
+        subfolders,
         forms: this.parseAdminForms(html).map((form) => ({
           id: form.id,
           action: form.action,
@@ -1825,6 +1847,177 @@ export class JoomlaClient {
         },
       },
       html: submitted.html,
+    };
+  }
+
+  async deleteMedia(data: {
+    path: string;
+    type?: "file" | "folder";
+    dryRun?: boolean;
+    confirm?: boolean;
+  }): Promise<JoomlaResponse> {
+    if (!data.path) return { success: false, message: "path is required" };
+
+    const parts = data.path.replace(/\/+$/, "").split("/");
+    const name = parts.pop() || "";
+    const parentFolder = parts.join("/");
+    const isFolder = data.type === "folder";
+
+    if (!name) return { success: false, message: "Invalid path: could not determine file/folder name" };
+
+    if (data.dryRun || !data.confirm) {
+      return {
+        success: true,
+        message: `[DRY RUN] Would delete ${isFolder ? "folder" : "file"} "${data.path}". Pass confirm=true to proceed.`,
+        data: { path: data.path, type: isFolder ? "folder" : "file", parentFolder, name, dryRun: true },
+      };
+    }
+
+    // POST to the task-specific URL so Joomla routes correctly regardless of POST body parsing
+    const mediaFolderUrl = this.getAdminUrl(`index.php?option=com_media&folder=${encodeURIComponent(parentFolder)}`);
+    const { html: pageHtml, token } = await this.getPage(mediaFolderUrl);
+    // Capture a snippet of the page HTML for debugging checkbox/form structure
+    const cbMatch = pageHtml.match(/cb\d[^>]*>[\s\S]{0,200}/g);
+    const htmlDebugSnippet = cbMatch ? cbMatch.slice(0, 5).join("\n") : pageHtml.substring(0, 500);
+    // Post to the base form action (matching how adminForm actually submits),
+    // with task + folder in the POST body — matching how Joomla JS builds the request.
+    const task = isFolder ? "folder.delete" : "file.delete";
+    const payload: FormDataMap = isFolder
+      ? { task, folder: data.path.replace(/\/+$/, ""), cb1: "0" }
+      : { task, folder: parentFolder, "rm[]": [name] };
+    if (token) payload[token.name] = token.value;
+    else if (this.tokenName) payload[this.tokenName] = "1";
+
+    const taskUrl = this.getAdminUrl("index.php?option=com_media");
+    const result = await this.request(taskUrl, {
+      method: "POST",
+      body: this.getFormUrlEncoded(payload),
+      contentType: "application/x-www-form-urlencoded",
+    });
+    // Follow redirect
+    const status = result.status;
+    const redirectLocation = result.headers.get("location") || "";
+    if (result.status === 302 || result.status === 303) {
+      if (redirectLocation) await this.request(this.resolveUrl(redirectLocation));
+    }
+
+    const listing = await this.mediaList(parentFolder || "index.php?option=com_media");
+    const listingData = (listing.data || {}) as Record<string, unknown>;
+    const listingFiles = (listingData.files || []) as Array<Record<string, string>>;
+    const subfolders = (listingData.subfolders || []) as Array<Record<string, string>>;
+    const stillExists = isFolder
+      ? subfolders.some((f) => f.label === name || decodeURIComponent(f.href || "").includes(`/${name}`))
+      : listingFiles.some((f) => f.src?.includes(`/${name}`) || f.name?.startsWith(name));
+    const deleted = !stillExists;
+
+    return {
+      success: deleted,
+      message: deleted
+        ? `${isFolder ? "Folder" : "File"} deleted: ${data.path}`
+        : `Delete submitted but "${name}" may still exist — check manually`,
+      data: {
+        path: data.path,
+        type: isFolder ? "folder" : "file",
+        parentFolder,
+        name,
+        httpStatus: status,
+        payloadSent: payload,
+        redirectLocation,
+        htmlDebugSnippet,
+        verification: { attempted: true, deleted },
+      },
+    };
+  }
+
+  async renameMediaFile(data: {
+    path: string;
+    newName: string;
+    dryRun?: boolean;
+    confirm?: boolean;
+  }): Promise<JoomlaResponse> {
+    if (!data.path) return { success: false, message: "path is required" };
+    if (!data.newName) return { success: false, message: "newName is required" };
+
+    const parts = data.path.split("/");
+    const oldName = parts.pop() || "";
+    const folder = parts.join("/");
+    const fileUrl = `${this.getBaseUrl()}/images/stories/${data.path}`;
+
+    if (data.dryRun || !data.confirm) {
+      return {
+        success: true,
+        message: `[DRY RUN] Would rename "${oldName}" → "${data.newName}" in folder "${folder || "root"}". Pass confirm=true to proceed.`,
+        data: { path: data.path, oldName, newName: data.newName, folder, fileUrl, dryRun: true },
+      };
+    }
+
+    const upload = await this.uploadMediaFile({ fileUrl, fileName: data.newName, folder, confirm: true });
+    if (!upload.success) {
+      return { success: false, message: `Rename failed: could not upload as "${data.newName}": ${upload.message}`, data: upload.data };
+    }
+
+    const del = await this.deleteMedia({ path: data.path, type: "file", confirm: true });
+
+    return {
+      success: del.success,
+      message: del.success
+        ? `Renamed "${oldName}" → "${data.newName}" in "${folder || "root"}"`
+        : `Uploaded "${data.newName}" but failed to delete original "${oldName}": ${del.message}`,
+      data: {
+        path: data.path,
+        newPath: folder ? `${folder}/${data.newName}` : data.newName,
+        oldName,
+        newName: data.newName,
+        folder,
+        uploadResult: upload.data,
+        deleteResult: del.data,
+      },
+    };
+  }
+
+  async moveMediaFile(data: {
+    path: string;
+    targetFolder: string;
+    dryRun?: boolean;
+    confirm?: boolean;
+  }): Promise<JoomlaResponse> {
+    if (!data.path) return { success: false, message: "path is required" };
+    if (data.targetFolder === undefined) return { success: false, message: "targetFolder is required" };
+
+    const parts = data.path.split("/");
+    const fileName = parts.pop() || "";
+    const sourceFolder = parts.join("/");
+    const fileUrl = `${this.getBaseUrl()}/images/stories/${data.path}`;
+
+    if (data.dryRun || !data.confirm) {
+      return {
+        success: true,
+        message: `[DRY RUN] Would move "${fileName}" from "${sourceFolder || "root"}" to "${data.targetFolder || "root"}". Pass confirm=true to proceed.`,
+        data: { path: data.path, fileName, sourceFolder, targetFolder: data.targetFolder, fileUrl, dryRun: true },
+      };
+    }
+
+    const upload = await this.uploadMediaFile({ fileUrl, fileName, folder: data.targetFolder, confirm: true });
+    if (!upload.success) {
+      return { success: false, message: `Move failed: could not upload to "${data.targetFolder}": ${upload.message}`, data: upload.data };
+    }
+
+    const del = await this.deleteMedia({ path: data.path, type: "file", confirm: true });
+
+    return {
+      success: del.success,
+      message: del.success
+        ? `Moved "${fileName}" from "${sourceFolder || "root"}" → "${data.targetFolder || "root"}"`
+        : `Uploaded to "${data.targetFolder}" but failed to delete source "${data.path}": ${del.message}`,
+      data: {
+        path: data.path,
+        newPath: data.targetFolder ? `${data.targetFolder}/${fileName}` : fileName,
+        fileName,
+        sourceFolder,
+        targetFolder: data.targetFolder,
+        uploadResult: upload.data,
+        deleteResult: del.data,
+      },
     };
   }
 
