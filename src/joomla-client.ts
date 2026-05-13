@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import yaml from "js-yaml";
 import { load as cheerioLoad } from "cheerio";
+import puppeteer, { type Browser } from 'puppeteer';
 
 export interface JoomlaConfig {
   baseUrl: string;
@@ -121,6 +122,7 @@ export class JoomlaClient {
   private config: JoomlaConfig;
   private cookies: Map<string, string> = new Map();
   private tokenName: string | null = null;
+  private _browser: Browser | null = null;
   /**
    * Cached Gantry 5 configuration entry URL (including CSRF token).
    * Populated on first successful navigation to the Gantry theme configure page
@@ -4893,6 +4895,22 @@ export class JoomlaClient {
     };
   }
 
+  private findMainContent($: ReturnType<typeof cheerioLoad>) {
+    const selectors = [
+      "#g-mainbar", "#g-content", "#g-container-main", // Gantry5 (before generic "main")
+      "[role='main']",
+      "#sp-main-body", "#sp-component",                // Protostar/Cassiopeia
+      ".com-content-article", ".item-page", "article", ".blog",
+      "#content", "main",
+    ];
+    for (const sel of selectors) {
+      const el = $(sel);
+      // require at least 150 chars of text so we skip empty wrappers
+      if (el.length > 0 && el.first().text().trim().length > 150) return el.first();
+    }
+    return $("body");
+  }
+
   async getFrontendPageInfo(path: string): Promise<JoomlaResponse> {
     const url = path.startsWith("http")
       ? path
@@ -4901,7 +4919,7 @@ export class JoomlaClient {
         : `${this.getBaseUrl()}/${path}`;
 
     const response = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; JoomlaMCP/1.0)" },
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36" },
       redirect: "follow",
     });
     if (!response.ok) {
@@ -4909,6 +4927,8 @@ export class JoomlaClient {
     }
     const html = await response.text();
     const $ = cheerioLoad(html);
+
+    // --- existing fields ---
     const pageTitle = $("title").first().text().trim();
     const h1 = $("h1").first().text().trim();
     const metaDescription = $("meta[name='description']").attr("content")?.trim() ?? "";
@@ -4918,11 +4938,220 @@ export class JoomlaClient {
       ? pageTitle.slice(0, -(` - ${siteName}`).length).trim()
       : pageTitle;
 
+    // --- headings ---
+    const headings: { level: number; text: string }[] = [];
+    $("h1, h2, h3, h4").slice(0, 50).each((_, el) => {
+      const level = parseInt(el.tagName.replace("h", ""), 10);
+      const text = $(el).text().trim();
+      if (text) headings.push({ level, text });
+    });
+
+    // --- main content area ---
+    const mainContent = this.findMainContent($);
+    const mainClone = mainContent.clone();
+    mainClone.find("script, style, noscript, nav, header, footer, .nav, .navbar, .breadcrumb, .pagination, #sp-menu, #sp-top-bar, #sp-header, #sp-footer, #sp-bottom").remove();
+
+    // --- bodyText ---
+    const rawText = mainClone.text().replace(/\s+/g, " ").trim();
+    const bodyText = rawText.length > 8000
+      ? rawText.slice(0, 8000) + ` [truncated — ${rawText.length} chars total]`
+      : rawText;
+
+    // --- links ---
+    const seenHrefs = new Set<string>();
+    const links: { text: string; href: string; rel?: string }[] = [];
+    mainContent.find("a[href]").each((_, el) => {
+      if (links.length >= 100) return;
+      const rawHref = $(el).attr("href") ?? "";
+      if (!rawHref || rawHref.startsWith("#") || rawHref.startsWith("javascript:")) return;
+      const text = $(el).text().trim();
+      if (!text) return;
+      let href = rawHref;
+      try { href = new URL(rawHref, url).href; } catch { return; }
+      if (seenHrefs.has(href)) return;
+      seenHrefs.add(href);
+      const rel = $(el).attr("rel");
+      links.push(rel ? { text, href, rel } : { text, href });
+    });
+
+    // --- images ---
+    const images: { src: string; alt: string }[] = [];
+    mainContent.find("img[src]").each((_, el) => {
+      if (images.length >= 20) return;
+      const rawSrc = $(el).attr("src") ?? "";
+      if (!rawSrc || rawSrc.startsWith("data:") || rawSrc.includes("/media/system/")) return;
+      let src = rawSrc;
+      try { src = new URL(rawSrc, url).href; } catch { return; }
+      images.push({ src, alt: $(el).attr("alt") ?? "" });
+    });
+
+    // --- forms ---
+    const forms: { action: string; method: string; fieldNames: string[] }[] = [];
+    $("form").each((_, el) => {
+      if (forms.length >= 10) return;
+      const fieldNames = [...new Set(
+        $(el).find("input[name], select[name], textarea[name]")
+          .map((__, f) => $(f).attr("name") ?? "").get().filter(Boolean)
+      )];
+      if (fieldNames.length === 0) return;
+      let action = $(el).attr("action") ?? url;
+      try { action = new URL(action, url).href; } catch { /* keep as-is */ }
+      const method = ($(el).attr("method") ?? "GET").toUpperCase();
+      forms.push({ action, method, fieldNames });
+    });
+
+    // --- openGraph ---
+    const ogTitle = $("meta[property='og:title']").attr("content")?.trim();
+    const ogDescription = $("meta[property='og:description']").attr("content")?.trim();
+    const ogImage = $("meta[property='og:image']").attr("content")?.trim();
+    const ogType = $("meta[property='og:type']").attr("content")?.trim();
+    const openGraph = (ogTitle || ogDescription || ogImage || ogType || siteName)
+      ? { title: ogTitle, description: ogDescription, image: ogImage, type: ogType, siteName: siteName || undefined }
+      : undefined;
+
+    // --- structuredData ---
+    const structuredData: unknown[] = [];
+    $("script[type='application/ld+json']").each((_, el) => {
+      if (structuredData.length >= 5) return;
+      try { structuredData.push(JSON.parse($(el).html() ?? "")); } catch { /* skip invalid */ }
+    });
+
+    // --- joomlaTemplate ---
+    let joomlaTemplate = "unknown";
+    $("link[rel='stylesheet']").each((_, el) => {
+      const href = $(el).attr("href") ?? "";
+      const match = href.match(/\/templates\/([^/]+)\//);
+      if (match) { joomlaTemplate = match[1]; return false; }
+    });
+    const bodyClasses = $("body").attr("class") ?? "";
+    const htmlClasses = $("html").attr("class") ?? "";
+    const allClasses = bodyClasses + " " + htmlClasses;
+    if (allClasses.match(/\bg-[a-z]/i) || $("[id='g-page-surround']").length > 0) {
+      const cssHref = $("link[rel='stylesheet'][href*='gantry5']").attr("href") ?? "";
+      const themeMatch = cssHref.match(/themes\/([^/]+)\//);
+      joomlaTemplate = themeMatch ? `gantry5 (${themeMatch[1]})` : "gantry5";
+    } else if (joomlaTemplate.includes("cassiopeia")) {
+      joomlaTemplate = "cassiopeia";
+    } else if (joomlaTemplate.includes("protostar")) {
+      joomlaTemplate = "protostar";
+    }
+
+    // --- joomlaContext ---
+    const bodyClassList = bodyClasses.split(/\s+/);
+    const component = bodyClassList.find(c => c.startsWith("com-"))?.replace("com-", "com_").replace(/-/g, "_") ?? null;
+    const view = bodyClassList.find(c => c.startsWith("view-"))?.replace("view-", "") ?? null;
+    const layout = bodyClassList.find(c => c.startsWith("layout-"))?.replace("layout-", "") ?? null;
+    const itemidRaw = bodyClassList.find(c => c.startsWith("itemid-"));
+    const itemid = itemidRaw ? itemidRaw.replace("itemid-", "") : null;
+    const language = $("html").attr("lang") ?? null;
+    const joomlaContext = { component, view, layout, itemid, language };
+
+    // --- articleTitles ---
+    const articleTitleSet = new Set<string>();
+    const articleSelectors = [
+      "h2.article-title", "h3.article-title",
+      "h2[itemprop='name']", "h3[itemprop='name']",
+      "h2.contentheading", "h3.contentheading",
+      "article header h2", "article header h3",
+      "[itemtype*='schema.org/Article'] [itemprop='name']",
+    ];
+    for (const sel of articleSelectors) {
+      $(sel).each((_, el) => {
+        const t = $(el).text().trim();
+        if (t) articleTitleSet.add(t);
+      });
+    }
+    // Catch-all: h2/h3 directly wrapping a link (standard Joomla blog layout)
+    $("h2 > a[href], h3 > a[href]").each((_, el) => {
+      const text = $(el).text().trim();
+      const href = $(el).attr("href") ?? "";
+      if (text && href && !href.startsWith("javascript:")) articleTitleSet.add(text);
+    });
+    const articleTitles = [...articleTitleSet].slice(0, 20);
+
+    // --- modulePositions ---
+    const positionSet = new Set<string>();
+    $("[id^='sp-']").each((_, el) => {
+      const pos = ($(el).attr("id") ?? "").replace(/^sp-/, "");
+      if (pos) positionSet.add(pos);
+    });
+    $("[id^='g-']").each((_, el) => {
+      const pos = ($(el).attr("id") ?? "").replace(/^g-/, "");
+      if (pos) positionSet.add(pos);
+    });
+    $("div[data-gantry-position]").each((_, el) => {
+      const pos = $(el).attr("data-gantry-position");
+      if (pos) positionSet.add(pos);
+    });
+    const modulePositions = [...positionSet];
+
     return {
       success: true,
       message: `Frontend page retrieved: ${url}`,
-      data: { url, pageTitle, cleanTitle, h1, metaDescription, canonicalUrl },
+      data: {
+        url, pageTitle, cleanTitle, h1, metaDescription, canonicalUrl,
+        headings, bodyText, links, images, forms, openGraph, structuredData,
+        joomlaTemplate, joomlaContext, articleTitles, modulePositions,
+      },
     };
+  }
+
+  async getFrontendScreenshot(
+    inputPath: string,
+    viewport: 'mobile' | 'tablet' | 'desktop' = 'desktop'
+  ): Promise<JoomlaResponse> {
+    const url = inputPath.startsWith('http')
+      ? inputPath
+      : inputPath.startsWith('/')
+        ? `${this.getBaseUrl()}${inputPath}`
+        : `${this.getBaseUrl()}/${inputPath}`;
+
+    const VIEWPORTS = {
+      mobile:  { width: 390,  height: 844 },
+      tablet:  { width: 768,  height: 1024 },
+      desktop: { width: 1280, height: 800 },
+    };
+    const { width, height } = VIEWPORTS[viewport];
+
+    if (!this._browser || !this._browser.connected) {
+      this._browser = await puppeteer.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
+      });
+    }
+
+    const page = await this._browser.newPage();
+    try {
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36');
+      await page.setViewport({ width, height });
+
+      const cookieDomain = new URL(this.getBaseUrl()).hostname;
+      const urlDomain = new URL(url).hostname;
+      const cookieEntries = Array.from(this.cookies.entries());
+      if (cookieEntries.length > 0 && urlDomain === cookieDomain) {
+        await page.setCookie(
+          ...cookieEntries.map(([name, value]) => ({ name, value, domain: cookieDomain }))
+        );
+      }
+
+      const response = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+      if (!response || !response.ok()) {
+        return { success: false, message: `HTTP ${response?.status() ?? '?'} fetching ${url}` };
+      }
+      await new Promise(r => setTimeout(r, 2000));
+
+      const pageTitle = await page.title();
+      const screenshotBuffer = await page.screenshot({ type: 'png', fullPage: false });
+      const base64 = Buffer.from(screenshotBuffer).toString('base64');
+
+      return {
+        success: true,
+        message: `Screenshot captured: ${url}`,
+        data: { url, pageTitle, viewport, width, height, base64 },
+      };
+    } finally {
+      await page.close();
+    }
   }
 
   private decodeHtml(html: string): string {

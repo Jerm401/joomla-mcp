@@ -1318,7 +1318,7 @@ const tools = [
   {
     name: "joomla_get_frontend_page",
     description:
-      "Fetch a public frontend page and extract structured info: pageTitle, cleanTitle (site name suffix stripped), h1, metaDescription, canonicalUrl. Use this when given a frontend URL or page title to identify the matching Joomla article — then pass cleanTitle to joomla_get_article or joomla_list_articles with the search parameter.",
+      "Fetch a public frontend page and return structured, AI-readable content: title, headings hierarchy, body text, all links and images in the main content area, forms, Open Graph metadata, JSON-LD structured data, detected Joomla template, active component/view context (from body classes), article titles visible on the page, and visible module positions. Use when you need to understand what a page contains, what template it uses, and how it is structured. Outputs cleanTitle (site name stripped) for matching to Joomla articles via joomla_list_articles.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1328,6 +1328,28 @@ const tools = [
         },
       },
       required: ["path"],
+    },
+  },
+  {
+    name: "joomla_get_frontend_screenshot",
+    description:
+      "Capture a real browser screenshot of a Joomla frontend page and return it as a PNG image. " +
+      "Injects the current admin session cookies so authenticated or preview content is visible. " +
+      "Use this to visually verify page layout, check images, or confirm content is rendering correctly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Frontend path (e.g. '/', '/about-us') or full URL. Defaults to '/'.",
+        },
+        viewport: {
+          type: "string",
+          enum: ["desktop", "tablet", "mobile"],
+          description: "Viewport preset: desktop (1280×800), tablet (768×1024), mobile (390×844). Defaults to 'desktop'.",
+        },
+      },
+      required: [],
     },
   },
   {
@@ -2320,6 +2342,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
 
         const result = await joomla.getFrontendPageInfo(path);
         return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_get_frontend_screenshot": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+
+        const screenshotPath = (args?.path as string | undefined) ?? "/";
+        const viewport = (args?.viewport as "desktop" | "tablet" | "mobile" | undefined) ?? "desktop";
+
+        const result = await joomla.getFrontendScreenshot(screenshotPath, viewport);
+
+        if (!result.success) {
+          return { content: [{ type: "text", text: formatResult(result) }], isError: true };
+        }
+
+        const { url, pageTitle, width, height, base64 } =
+          result.data as { url: string; pageTitle: string; viewport: string; width: number; height: number; base64: string };
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ success: true, url, pageTitle, viewport, width, height }, null, 2),
+            },
+            {
+              type: "image",
+              data: base64,
+              mimeType: "image/png",
+            },
+          ],
+          isError: false,
+        };
       }
 
       case "joomla_page_content": {
