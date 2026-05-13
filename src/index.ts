@@ -27,6 +27,12 @@ const config = {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean)
   ),
+  disabledTools: new Set(
+    (process.env.DISABLED_TOOLS || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  ),
 };
 
 // Format response for LLM consumption
@@ -1352,32 +1358,21 @@ const tools = [
       required: [],
     },
   },
-  {
-    name: "joomla_page_content",
-    description:
-      "Get raw HTML content of any admin page for debugging or exploration. Use the admin path like 'index.php?option=com_content&view=articles'.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        path: {
-          type: "string",
-          description: "Admin page path (e.g., 'index.php?option=com_content&view=articles')",
-        },
-      },
-      required: ["path"],
-    },
-  },
 ];
 
 // Register tool handlers
 server.setRequestHandler(ListToolsRequestSchema, async () => {
   return {
-    tools,
+    tools: tools.filter((t) => !config.disabledTools.has(t.name.toLowerCase())),
   };
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name: string; arguments?: Record<string, unknown> } }) => {
   const { name, arguments: args } = request.params;
+
+  if (config.disabledTools.has(name.toLowerCase())) {
+    return { content: [{ type: "text", text: JSON.stringify({ success: false, message: `Tool "${name}" is currently disabled.` }) }] };
+  }
 
   try {
     switch (name) {
@@ -2373,20 +2368,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
             },
           ],
           isError: false,
-        };
-      }
-
-      case "joomla_page_content": {
-        const login = await ensureLoggedIn();
-        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
-
-        const path = args?.path as string;
-        if (!path) return { content: [{ type: "text", text: "Error: path is required" }], isError: true };
-
-        const result = await joomla.getPageContent(path);
-        return {
-          content: [{ type: "text", text: formatResult(result) }],
-          isError: !result.success,
         };
       }
 

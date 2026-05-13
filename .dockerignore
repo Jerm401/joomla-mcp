@@ -5,3 +5,4 @@ blueprints
 docs
 .env
 dist
+.puppeteer-cache
