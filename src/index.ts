@@ -1034,6 +1034,25 @@ const tools = [
     },
   },
   {
+    name: "joomla_bulk_checkin",
+    description:
+      "List all checked-out items site-wide (articles, modules, menu items, etc.) and optionally release them all in one step. Defaults to dry-run — inspect the list first, then pass confirm=true to check everything in.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        dryRun: {
+          type: "boolean",
+          description: "Return the list of checked-out items without checking them in (default when confirm is absent).",
+        },
+        confirm: {
+          type: "boolean",
+          description: "Set true to check in all listed items for real.",
+        },
+      },
+      required: [],
+    },
+  },
+  {
     name: "joomla_backend_inventory",
     description:
       "Discover the Joomla backend surface: admin links/components, module types, menu item types, Gantry outlines, and key build forms.",
@@ -1249,6 +1268,41 @@ const tools = [
         confirm: { type: "boolean" },
       },
       required: ["folderName"],
+    },
+  },
+  {
+    name: "joomla_media_upload",
+    description:
+      "Upload a file to the Joomla Media Manager. Provide either fileUrl (downloads the file from that URL then uploads it) or base64Content + fileName (uploads raw bytes). Specify folder to target a subfolder relative to the image manager root (e.g. 'documents', 'library/hero'). Omit folder to upload to the image manager root. Defaults to dry-run — pass confirm=true to actually upload.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        fileUrl: {
+          type: "string",
+          description: "Public URL to download the file from. The server fetches this URL then uploads the result.",
+        },
+        base64Content: {
+          type: "string",
+          description: "Base64-encoded file content. Requires fileName.",
+        },
+        fileName: {
+          type: "string",
+          description: "Target file name (e.g. 'hero-banner.jpg'). Required when using base64Content; optional with fileUrl (inferred from URL).",
+        },
+        folder: {
+          type: "string",
+          description: "Destination folder relative to the image manager root (e.g. 'documents' or 'library/hero'). Omit to upload to the image manager root.",
+        },
+        dryRun: {
+          type: "boolean",
+          description: "Preview what would be uploaded without actually sending (default: true when confirm is absent).",
+        },
+        confirm: {
+          type: "boolean",
+          description: "Set true to execute the upload for real.",
+        },
+      },
+      required: [],
     },
   },
   {
@@ -2102,6 +2156,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         };
       }
 
+      case "joomla_bulk_checkin": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.bulkCheckin({
+          dryRun: args?.dryRun as boolean,
+          confirm: args?.confirm as boolean,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
       case "joomla_backend_inventory": {
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
@@ -2245,6 +2309,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
           folderName,
           folderBase: args?.folderBase as string,
           path: args?.path as string,
+          dryRun: args?.dryRun as boolean,
+          confirm: args?.confirm as boolean,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_media_upload": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.uploadMediaFile({
+          fileUrl: args?.fileUrl as string,
+          base64Content: args?.base64Content as string,
+          fileName: args?.fileName as string,
+          folder: args?.folder as string,
           dryRun: args?.dryRun as boolean,
           confirm: args?.confirm as boolean,
         });

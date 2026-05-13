@@ -557,7 +557,7 @@ export class JoomlaClient {
 
   private async request(
     url: string,
-    options?: { method?: string; body?: string; contentType?: string }
+    options?: { method?: string; body?: string | FormData; contentType?: string }
   ): Promise<{ status: number; headers: Map<string, string>; body: string }> {
     const headers: Record<string, string> = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -569,14 +569,15 @@ export class JoomlaClient {
       headers["Cookie"] = cookieHeader;
     }
 
-    if (options?.contentType) {
+    // Don't set Content-Type for FormData — fetch sets it with the multipart boundary
+    if (options?.contentType && !(options.body instanceof FormData)) {
       headers["Content-Type"] = options.contentType;
     }
 
     const fetchOptions: RequestInit = {
       method: options?.method || "GET",
       headers,
-      body: options?.body,
+      body: options?.body as string | FormData | undefined,
       redirect: "manual",
     };
 
@@ -1724,24 +1725,47 @@ export class JoomlaClient {
     const pathValue = pathOrFolder.includes("index.php")
       ? pathOrFolder
       : `index.php?option=com_media&folder=${encodeURIComponent(pathOrFolder)}`;
-    const { html } = await this.getPage(this.adminPathToUrl(pathValue));
+
+    // Extract the folder parameter so we can build the imagesList URL
+    const folderMatch = pathValue.match(/[?&]folder=([^&]*)/);
+    const folderParam = folderMatch ? folderMatch[1] : "";
+
+    // Fetch main page (navigation + forms) and imagesList view (actual files in static HTML) in parallel
+    const [{ html }, imagesListResult] = await Promise.all([
+      this.getPage(this.adminPathToUrl(pathValue)),
+      this.getPage(this.getAdminUrl(
+        `index.php?option=com_media&view=imagesList&tmpl=component&folder=${folderParam}`
+      )),
+    ]);
+
+    // Parse folder/nav links from the main page
     const links = this.parseAdminLinks(html)
       .filter((link) => /com_media|task=file|task=folder|download|images\//i.test(link.href + " " + link.text))
       .slice(0, 200);
-    const $media = this.$c(html);
-    const images = $media("img[src]").map((_, el) => {
-      const $el = $media(el);
-      return { src: $el.attr("src") || "", alt: $el.attr("alt") || "" };
+
+    // Parse actual files from the imagesList component view (rendered as static img tags)
+    const $list = this.$c(imagesListResult.html);
+    const files = $list("img[src]").map((_, el) => {
+      const $el = $list(el);
+      const src = $el.attr("src") || "";
+      const name = $el.attr("alt") || src.split("/").pop() || src;
+      const $container = $el.closest("li, .imgOutline, div[class*='img']");
+      const label = $container.find("a, .imgInfoBar, span").first().text().trim() || name;
+      return { name, src, label };
     }).get()
-      .filter((image) => !/administrator\/templates|media\/system/i.test(image.src))
+      .filter((f) => f.src && !/media\/system|jui\/img|alpha\.png|administrator\/templates/i.test(f.src))
       .slice(0, 200);
+
     return {
       success: true,
-      message: `Inspected media manager (${links.length} links, ${images.length} image references)`,
+      message: files.length > 0
+        ? `Found ${files.length} file(s) in folder "${decodeURIComponent(folderParam) || "root"}"`
+        : `No files found in folder "${decodeURIComponent(folderParam) || "root"}" (${links.length} subfolders available)`,
       data: {
         path: pathValue,
-        links,
-        images,
+        folder: decodeURIComponent(folderParam) || "root",
+        files,
+        subfolders: links,
         forms: this.parseAdminForms(html).map((form) => ({
           id: form.id,
           action: form.action,
@@ -5152,6 +5176,179 @@ export class JoomlaClient {
     } finally {
       await page.close();
     }
+  }
+
+  // ==================== MEDIA UPLOAD ====================
+
+  async uploadMediaFile(data: {
+    fileUrl?: string;
+    base64Content?: string;
+    fileName?: string;
+    folder?: string;
+    dryRun?: boolean;
+    confirm?: boolean;
+  }): Promise<JoomlaResponse> {
+    if (!data.fileUrl && !(data.base64Content && data.fileName)) {
+      return { success: false, message: "Either fileUrl or (base64Content + fileName) is required" };
+    }
+
+    let fileContent: Buffer;
+    let fileName: string;
+
+    if (data.fileUrl) {
+      const response = await fetch(data.fileUrl);
+      if (!response.ok) {
+        return { success: false, message: `Failed to download file from ${data.fileUrl}: HTTP ${response.status}` };
+      }
+      fileContent = Buffer.from(await response.arrayBuffer());
+      fileName = data.fileName || data.fileUrl.split("/").pop()?.split("?")[0] || "upload.bin";
+    } else {
+      fileContent = Buffer.from(data.base64Content!, "base64");
+      fileName = data.fileName!;
+    }
+
+    const targetFolder = data.folder ?? "";
+
+    if (data.dryRun || !data.confirm) {
+      return {
+        success: true,
+        message: `[DRY RUN] Would upload "${fileName}" (${fileContent.length} bytes) to folder "${targetFolder}". Pass confirm=true to proceed.`,
+        data: { fileName, fileSize: fileContent.length, targetFolder, dryRun: true },
+      };
+    }
+
+    // Navigate to the media page with the target folder so we get the correct upload form action URL
+    const folderParam = targetFolder ? `&folder=${encodeURIComponent(targetFolder)}` : "";
+    const mediaPageUrl = this.getAdminUrl(`index.php?option=com_media${folderParam}`);
+    const { html } = await this.getPage(mediaPageUrl);
+
+    // Extract the real upload form action URL (contains CSRF token in query string)
+    const $ = this.$c(html);
+    const uploadFormAction = $("form#uploadForm").attr("action");
+    if (!uploadFormAction) {
+      return { success: false, message: "Failed to find upload form on media page" };
+    }
+
+    // Extract hidden fields from the upload form (folder, CSRF token if in body, etc.)
+    const formData = new FormData();
+    $("form#uploadForm input[type='hidden']").each((_: number, el: any) => {
+      const name = $(el).attr("name");
+      const value = $(el).attr("value") ?? "";
+      if (name) formData.append(name, value);
+    });
+
+    // Ensure folder is set correctly (hidden field may already have it, but override to be sure)
+    formData.set("folder", targetFolder);
+
+    const blob = new Blob([new Uint8Array(fileContent)], { type: this.getMimeType(fileName) });
+    formData.append("Filedata[]", blob, fileName);
+
+    const uploadUrl = uploadFormAction.startsWith("http")
+      ? uploadFormAction
+      : this.getAdminUrl(uploadFormAction);
+
+    const result = await this.request(uploadUrl, { method: "POST", body: formData });
+
+    // Joomla redirects (303) after upload — follow the Location header to get the result page
+    let resultHtml = result.body;
+    if (result.status === 303 || result.status === 302) {
+      const location = result.headers.get("location");
+      if (location) {
+        const redirectUrl = location.startsWith("http") ? location : this.getAdminUrl(location);
+        const redirectResult = await this.request(redirectUrl);
+        resultHtml = redirectResult.body;
+      }
+    }
+
+    // Only treat the upload as failed if there is an error/warning alert (not a success alert)
+    const $r = this.$c(resultHtml);
+    const errorMsg = $r('.alert-error .alert-message, .alert-danger .alert-message, .alert-warning .alert-message').first().text().trim() || null;
+    const isSuccess = result.status < 500 && !errorMsg;
+
+    const uploadedPath = targetFolder ? `${targetFolder}/${fileName}` : fileName;
+
+    return {
+      success: isSuccess,
+      message: isSuccess ? `Uploaded: ${uploadedPath}` : (errorMsg || `Upload failed (HTTP ${result.status})`),
+      data: { fileName, fileSize: fileContent.length, targetFolder, uploadedPath },
+    };
+  }
+
+  private getMimeType(fileName: string): string {
+    const ext = (fileName.split(".").pop() || "").toLowerCase();
+    const map: Record<string, string> = {
+      jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png",
+      gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+      pdf: "application/pdf",
+      doc: "application/msword",
+      docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      xls: "application/vnd.ms-excel",
+      xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      zip: "application/zip", mp4: "video/mp4", mp3: "audio/mpeg",
+    };
+    return map[ext] || "application/octet-stream";
+  }
+
+  // ==================== BULK CHECKIN ====================
+
+  async bulkCheckin(data: { dryRun?: boolean; confirm?: boolean } = {}): Promise<JoomlaResponse> {
+    const url = this.getAdminUrl("index.php?option=com_checkin");
+    const { html } = await this.getPage(url);
+    const $ = this.$c(html);
+
+    const items: Array<{ id: string; title: string; type: string; editor: string; time: string }> = [];
+    $("tr").each((_, el) => {
+      const $row = $(el);
+      const cid = $row.find("input[name='cid[]']").attr("value");
+      if (!cid) return;
+      const cells = $row.find("td");
+      items.push({
+        id: cid,
+        title: $(cells[1]).text().trim(),
+        type: $(cells[2]).text().trim(),
+        editor: $(cells[3]).text().trim(),
+        time: $(cells[4]).text().trim(),
+      });
+    });
+
+    if (items.length === 0) {
+      return { success: true, message: "No checked-out items found — nothing to check in", data: { items: [] } };
+    }
+
+    if (data.dryRun || !data.confirm) {
+      return {
+        success: true,
+        message: `[DRY RUN] Found ${items.length} checked-out item(s). Pass confirm=true to check them all in.`,
+        data: { items, dryRun: true },
+      };
+    }
+
+    const token = this.extractCsrfToken(html);
+    if (!token) {
+      return { success: false, message: "Failed to extract CSRF token from checkin page" };
+    }
+
+    const formData: FormDataMap = {
+      task: "checkin.checkin",
+      [token.name]: token.value,
+      boxchecked: String(items.length),
+      "cid[]": items.map((i) => i.id),
+    };
+
+    await this.postPage(url, formData);
+
+    // Verify by re-loading the checkin page
+    const verify = await this.getPage(url);
+    const remaining = this.$c(verify.html)("input[name='cid[]']").length;
+    const success = remaining === 0;
+
+    return {
+      success,
+      message: success
+        ? `Checked in ${items.length} item(s)`
+        : `Check-in submitted, but ${remaining} item(s) still appear checked out`,
+      data: { checkedIn: items, remainingCount: remaining },
+    };
   }
 
   private decodeHtml(html: string): string {
