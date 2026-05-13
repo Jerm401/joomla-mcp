@@ -557,7 +557,7 @@ export class JoomlaClient {
 
   private async request(
     url: string,
-    options?: { method?: string; body?: string | FormData; contentType?: string }
+    options?: { method?: string; body?: string | FormData; contentType?: string; additionalHeaders?: Record<string, string> }
   ): Promise<{ status: number; headers: Map<string, string>; body: string }> {
     const headers: Record<string, string> = {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -572,6 +572,10 @@ export class JoomlaClient {
     // Don't set Content-Type for FormData — fetch sets it with the multipart boundary
     if (options?.contentType && !(options.body instanceof FormData)) {
       headers["Content-Type"] = options.contentType;
+    }
+
+    if (options?.additionalHeaders) {
+      Object.assign(headers, options.additionalHeaders);
     }
 
     const fetchOptions: RequestInit = {
@@ -2029,8 +2033,221 @@ export class JoomlaClient {
     return this.inspectAdminForm(pathOrUrl);
   }
 
+  // ==================== DOCMAN JSON API ====================
+
+  private async docmanApiCall(
+    path: string,
+    method: "GET" | "POST" | "PATCH" | "DELETE" = "GET",
+    data?: Record<string, string>
+  ): Promise<{ success: boolean; entity: Record<string, unknown> | null; entities: Array<Record<string, unknown>>; meta: Record<string, unknown>; error?: string }> {
+    if (!this.tokenName) {
+      await this.getPage(this.getAdminUrl("index.php?option=com_docman&view=documents"));
+    }
+    const baseUrl = this.config.baseUrl.replace(/\/$/, "");
+    const additionalHeaders: Record<string, string> = {
+      "Origin": baseUrl,
+      "Referer": this.getAdminUrl("index.php?option=com_docman&view=documents"),
+      "Accept": "application/json",
+    };
+    let body: string | undefined;
+    let url = this.getAdminUrl(path);
+    if ((method === "POST" || method === "PATCH") && data !== undefined) {
+      const payload: Record<string, string> = { ...(data || {}) };
+      if (this.tokenName) payload[this.tokenName] = "1";
+      body = this.getFormUrlEncoded(payload);
+    } else if (method === "DELETE" && this.tokenName) {
+      url = url + (url.includes("?") ? "&" : "?") + `${this.tokenName}=1`;
+    }
+    const result = await this.request(url, {
+      method,
+      body,
+      contentType: body ? "application/x-www-form-urlencoded" : undefined,
+      additionalHeaders,
+    });
+    if (!result.body || result.body.trim() === "") {
+      return { success: true, entity: null, entities: [], meta: {} };
+    }
+    try {
+      const json = JSON.parse(result.body) as Record<string, unknown>;
+      if (json.errors) {
+        const errors = json.errors as Array<{ message?: string }>;
+        return { success: false, entity: null, entities: [], meta: {}, error: errors[0]?.message || "Unknown error" };
+      }
+      const entities = (json.entities || []) as Array<Record<string, unknown>>;
+      const meta = (json.meta || {}) as Record<string, unknown>;
+      return { success: true, entity: entities[0] || null, entities, meta };
+    } catch {
+      return { success: false, entity: null, entities: [], meta: {}, error: "Failed to parse JSON response" };
+    }
+  }
+
+  private mapDocmanDocument(e: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: e.id,
+      title: e.title,
+      slug: e.slug,
+      categoryId: e.docman_category_id,
+      categoryTitle: e.category_title,
+      categoryPath: e.category_path,
+      enabled: e.enabled,
+      status: e.status,
+      access: e.access,
+      description: e.description,
+      storagePath: e.storage_path,
+      storageType: e.storage_type,
+      extension: e.extension,
+      size: e.size,
+      createdOn: e.created_on,
+      modifiedOn: e.modified_on,
+      editUrl: this.getAdminUrl(`index.php?option=com_docman&view=document&id=${e.id}&format=json`),
+    };
+  }
+
+  private mapDocmanCategory(e: Record<string, unknown>): Record<string, unknown> {
+    return {
+      id: e.id,
+      title: e.title,
+      slug: e.slug,
+      parentId: e.parent_id,
+      hierarchyTitle: e.hierarchy_title,
+      enabled: e.enabled,
+      access: e.access,
+      description: e.description,
+      folder: e.folder,
+      createdOn: e.created_on,
+      modifiedOn: e.modified_on,
+      editUrl: this.getAdminUrl(`index.php?option=com_docman&view=category&id=${e.id}&format=json`),
+    };
+  }
+
   async listDocmanDocuments(): Promise<JoomlaResponse> {
-    return this.inspectAdminList("index.php?option=com_docman&view=documents");
+    const result = await this.docmanApiCall("index.php?option=com_docman&view=documents&format=json");
+    if (!result.success) return { success: false, message: result.error || "Failed to list documents" };
+    const total = (result.meta as Record<string, unknown>)?.total ?? result.entities.length;
+    return {
+      success: true,
+      message: `Found ${total} document(s)`,
+      data: result.entities.map(e => this.mapDocmanDocument(e)),
+    };
+  }
+
+  async listDocmanCategories(): Promise<JoomlaResponse> {
+    const result = await this.docmanApiCall("index.php?option=com_docman&view=categories&format=json");
+    if (!result.success) return { success: false, message: result.error || "Failed to list categories" };
+    const total = (result.meta as Record<string, unknown>)?.total ?? result.entities.length;
+    return {
+      success: true,
+      message: `Found ${total} category(ies)`,
+      data: result.entities.map(e => this.mapDocmanCategory(e)),
+    };
+  }
+
+  async getDocmanDocument(id: string): Promise<JoomlaResponse> {
+    const result = await this.docmanApiCall(`index.php?option=com_docman&view=document&id=${id}&format=json`);
+    if (!result.success) return { success: false, message: result.error || "Failed to get document" };
+    if (!result.entity) return { success: false, message: "Document not found" };
+    return { success: true, message: "OK", data: this.mapDocmanDocument(result.entity) };
+  }
+
+  async getDocmanCategory(id: string): Promise<JoomlaResponse> {
+    const result = await this.docmanApiCall(`index.php?option=com_docman&view=category&id=${id}&format=json`);
+    if (!result.success) return { success: false, message: result.error || "Failed to get category" };
+    if (!result.entity) return { success: false, message: "Category not found" };
+    return { success: true, message: "OK", data: this.mapDocmanCategory(result.entity) };
+  }
+
+  async createDocmanDocument(data: {
+    title: string;
+    categoryId: string;
+    storageType?: string;
+    storagePath?: string;
+    description?: string;
+    access?: string;
+    enabled?: string;
+  }): Promise<JoomlaResponse> {
+    const payload: Record<string, string> = {
+      title: data.title,
+      docman_category_id: data.categoryId,
+      storage_type: data.storageType ?? "file",
+    };
+    if (data.storagePath !== undefined) payload.storage_path = data.storagePath;
+    if (data.description !== undefined) payload.description = data.description;
+    if (data.access !== undefined) payload.access = data.access;
+    if (data.enabled !== undefined) payload.enabled = data.enabled;
+    const result = await this.docmanApiCall("index.php?option=com_docman&view=document&format=json", "POST", payload);
+    if (!result.success) return { success: false, message: result.error || "Failed to create document" };
+    if (!result.entity) return { success: false, message: "Document created but no entity returned" };
+    return { success: true, message: "Document created", data: this.mapDocmanDocument(result.entity) };
+  }
+
+  async createDocmanCategory(data: {
+    title: string;
+    parentId?: string;
+    description?: string;
+    access?: string;
+    enabled?: string;
+  }): Promise<JoomlaResponse> {
+    const payload: Record<string, string> = { title: data.title };
+    if (data.parentId !== undefined) payload.parent_id = data.parentId;
+    if (data.description !== undefined) payload.description = data.description;
+    if (data.access !== undefined) payload.access = data.access;
+    if (data.enabled !== undefined) payload.enabled = data.enabled;
+    const result = await this.docmanApiCall("index.php?option=com_docman&view=category&format=json", "POST", payload);
+    if (!result.success) return { success: false, message: result.error || "Failed to create category" };
+    if (!result.entity) return { success: false, message: "Category created but no entity returned" };
+    return { success: true, message: "Category created", data: this.mapDocmanCategory(result.entity) };
+  }
+
+  async updateDocmanDocument(id: string, data: {
+    title?: string;
+    categoryId?: string;
+    storagePath?: string;
+    description?: string;
+    access?: string;
+    enabled?: string;
+  }): Promise<JoomlaResponse> {
+    const payload: Record<string, string> = {};
+    if (data.title !== undefined) payload.title = data.title;
+    if (data.categoryId !== undefined) payload.docman_category_id = data.categoryId;
+    if (data.storagePath !== undefined) payload.storage_path = data.storagePath;
+    if (data.description !== undefined) payload.description = data.description;
+    if (data.access !== undefined) payload.access = data.access;
+    if (data.enabled !== undefined) payload.enabled = data.enabled;
+    const result = await this.docmanApiCall(`index.php?option=com_docman&view=document&id=${id}&format=json`, "PATCH", payload);
+    if (!result.success) return { success: false, message: result.error || "Failed to update document" };
+    if (!result.entity) return { success: false, message: "Document updated but no entity returned" };
+    return { success: true, message: "Document updated", data: this.mapDocmanDocument(result.entity) };
+  }
+
+  async updateDocmanCategory(id: string, data: {
+    title?: string;
+    parentId?: string;
+    description?: string;
+    access?: string;
+    enabled?: string;
+  }): Promise<JoomlaResponse> {
+    const payload: Record<string, string> = {};
+    if (data.title !== undefined) payload.title = data.title;
+    if (data.parentId !== undefined) payload.parent_id = data.parentId;
+    if (data.description !== undefined) payload.description = data.description;
+    if (data.access !== undefined) payload.access = data.access;
+    if (data.enabled !== undefined) payload.enabled = data.enabled;
+    const result = await this.docmanApiCall(`index.php?option=com_docman&view=category&id=${id}&format=json`, "PATCH", payload);
+    if (!result.success) return { success: false, message: result.error || "Failed to update category" };
+    if (!result.entity) return { success: false, message: "Category updated but no entity returned" };
+    return { success: true, message: "Category updated", data: this.mapDocmanCategory(result.entity) };
+  }
+
+  async deleteDocmanDocument(id: string): Promise<JoomlaResponse> {
+    const result = await this.docmanApiCall(`index.php?option=com_docman&view=document&id=${id}&format=json`, "DELETE");
+    if (!result.success) return { success: false, message: result.error || "Failed to delete document" };
+    return { success: true, message: "Document deleted", data: { id } };
+  }
+
+  async deleteDocmanCategory(id: string): Promise<JoomlaResponse> {
+    const result = await this.docmanApiCall(`index.php?option=com_docman&view=category&id=${id}&format=json`, "DELETE");
+    if (!result.success) return { success: false, message: result.error || "Failed to delete category" };
+    return { success: true, message: "Category deleted", data: { id } };
   }
 
   async listFilemanFiles(): Promise<JoomlaResponse> {

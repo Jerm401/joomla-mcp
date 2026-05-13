@@ -1378,8 +1378,122 @@ const tools = [
   },
   {
     name: "joomla_docman_list_documents",
-    description: "Inspect DOCman documents list.",
+    description: "List all DOCman documents. Returns id, title, category, enabled/published state, storage path, and edit URL for each document.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "joomla_docman_list_categories",
+    description: "List all DOCman categories (folders). Returns id, title, parent, enabled state, and hierarchy for each category.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "joomla_docman_get_document",
+    description: "Get a single DOCman document by ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Document ID." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "joomla_docman_get_category",
+    description: "Get a single DOCman category by ID.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Category ID." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "joomla_docman_create_document",
+    description: "Create a new DOCman document entry referencing an existing file in the DOCman storage folder.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Document title." },
+        categoryId: { type: "string", description: "ID of the DOCman category this document belongs to." },
+        storagePath: { type: "string", description: "Relative path to the file within the DOCman files folder, e.g. 'bulletin/MyFile.pdf'." },
+        storageType: { type: "string", description: "Storage type. Defaults to 'file'." },
+        description: { type: "string", description: "Optional document description." },
+        access: { type: "string", description: "Access level ID (1=Public, 2=Registered, etc.)." },
+        enabled: { type: "string", enum: ["0", "1"], description: "Published state. 1=published (default), 0=unpublished." },
+      },
+      required: ["title", "categoryId"],
+    },
+  },
+  {
+    name: "joomla_docman_create_category",
+    description: "Create a new DOCman category (folder).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Category title." },
+        parentId: { type: "string", description: "Parent category ID. Omit for a root-level category." },
+        description: { type: "string", description: "Optional category description." },
+        access: { type: "string", description: "Access level ID (1=Public, 2=Registered, etc.)." },
+        enabled: { type: "string", enum: ["0", "1"], description: "Published state. 1=published (default), 0=unpublished." },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "joomla_docman_update_document",
+    description: "Update an existing DOCman document. Use this to rename, move to another category, change published state, or update the file path.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Document ID to update." },
+        title: { type: "string", description: "New title." },
+        categoryId: { type: "string", description: "New category ID (moves the document to a different folder)." },
+        storagePath: { type: "string", description: "New relative file path." },
+        description: { type: "string", description: "New description." },
+        access: { type: "string", description: "New access level ID." },
+        enabled: { type: "string", enum: ["0", "1"], description: "Published state. 1=published, 0=unpublished." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "joomla_docman_update_category",
+    description: "Update an existing DOCman category. Use this to rename, move to a different parent, or change published state.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Category ID to update." },
+        title: { type: "string", description: "New title." },
+        parentId: { type: "string", description: "New parent category ID." },
+        description: { type: "string", description: "New description." },
+        access: { type: "string", description: "New access level ID." },
+        enabled: { type: "string", enum: ["0", "1"], description: "Published state. 1=published, 0=unpublished." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "joomla_docman_delete_document",
+    description: "Delete a DOCman document. Confirm with the user before calling — this is destructive.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Document ID to delete." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "joomla_docman_delete_category",
+    description: "Delete a DOCman category. Confirm with the user before calling — this is destructive.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "Category ID to delete." },
+      },
+      required: ["id"],
+    },
   },
   {
     name: "joomla_fileman_list_files",
@@ -2454,6 +2568,96 @@ server.setRequestHandler(CallToolRequestSchema, async (request: { params: { name
         const login = await ensureLoggedIn();
         if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
         const result = await joomla.listDocmanDocuments();
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_list_categories": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.listDocmanCategories();
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_get_document": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.getDocmanDocument(String(args?.id));
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_get_category": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.getDocmanCategory(String(args?.id));
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_create_document": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.createDocmanDocument({
+          title: String(args?.title),
+          categoryId: String(args?.categoryId),
+          storagePath: args?.storagePath !== undefined ? String(args.storagePath) : undefined,
+          storageType: args?.storageType !== undefined ? String(args.storageType) : undefined,
+          description: args?.description !== undefined ? String(args.description) : undefined,
+          access: args?.access !== undefined ? String(args.access) : undefined,
+          enabled: args?.enabled !== undefined ? String(args.enabled) : undefined,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_create_category": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.createDocmanCategory({
+          title: String(args?.title),
+          parentId: args?.parentId !== undefined ? String(args.parentId) : undefined,
+          description: args?.description !== undefined ? String(args.description) : undefined,
+          access: args?.access !== undefined ? String(args.access) : undefined,
+          enabled: args?.enabled !== undefined ? String(args.enabled) : undefined,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_update_document": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.updateDocmanDocument(String(args?.id), {
+          title: args?.title !== undefined ? String(args.title) : undefined,
+          categoryId: args?.categoryId !== undefined ? String(args.categoryId) : undefined,
+          storagePath: args?.storagePath !== undefined ? String(args.storagePath) : undefined,
+          description: args?.description !== undefined ? String(args.description) : undefined,
+          access: args?.access !== undefined ? String(args.access) : undefined,
+          enabled: args?.enabled !== undefined ? String(args.enabled) : undefined,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_update_category": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.updateDocmanCategory(String(args?.id), {
+          title: args?.title !== undefined ? String(args.title) : undefined,
+          parentId: args?.parentId !== undefined ? String(args.parentId) : undefined,
+          description: args?.description !== undefined ? String(args.description) : undefined,
+          access: args?.access !== undefined ? String(args.access) : undefined,
+          enabled: args?.enabled !== undefined ? String(args.enabled) : undefined,
+        });
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_delete_document": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.deleteDocmanDocument(String(args?.id));
+        return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
+      }
+
+      case "joomla_docman_delete_category": {
+        const login = await ensureLoggedIn();
+        if (!login.success) return { content: [{ type: "text", text: formatResult(login) }], isError: true };
+        const result = await joomla.deleteDocmanCategory(String(args?.id));
         return { content: [{ type: "text", text: formatResult(result) }], isError: !result.success };
       }
 
