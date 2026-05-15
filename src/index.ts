@@ -27,6 +27,12 @@ const config = {
       .map((s) => s.trim().toLowerCase())
       .filter(Boolean)
   ),
+  menuItemTypeBlacklist: new Set(
+    (process.env.MENU_ITEM_TYPE_BLACKLIST || "")
+      .split(",")
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean)
+  ),
   disabledTools: new Set(
     (process.env.DISABLED_TOOLS || "")
       .split(",")

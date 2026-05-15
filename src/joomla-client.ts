@@ -11,6 +11,7 @@ export interface JoomlaConfig {
   username: string;
   password: string;
   moduleTypeBlacklist?: Set<string>;
+  menuItemTypeBlacklist?: Set<string>;
 }
 
 export interface JoomlaResponse {
@@ -4808,7 +4809,12 @@ export class JoomlaClient {
   async listMenuItemTypes(): Promise<JoomlaResponse> {
     const url = this.getAdminUrl("index.php?option=com_menus&view=menutypes&tmpl=component&client_id=0&recordId=0");
     const { html } = await this.getPage(url);
-    const types = this.parseMenuItemTypes(html);
+    const blacklist = this.config.menuItemTypeBlacklist;
+    const types = this.parseMenuItemTypes(html).filter((t) => {
+      if (!blacklist || blacklist.size === 0) return true;
+      const cleanLabel = t.label.split("\t")[0].trim().toLowerCase();
+      return !blacklist.has(cleanLabel);
+    });
 
     return {
       success: true,
