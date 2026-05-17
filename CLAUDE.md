@@ -23,7 +23,6 @@ Read the `editing-rules` MCP resource at the start of every session. It contains
 Additional workflow docs are available as MCP resources. Only read these when explicitly performing that workflow — do not load them by default:
 
 - `joomla-docs://agents/audit-agent.md` — site audit checklist and approach
-- `joomla-docs://agents/builder-agent.md` — page and menu building workflow
 - `joomla-docs://agents/content-agent.md` — article and content editing workflow
 
 To list all available guides: `resources/list`

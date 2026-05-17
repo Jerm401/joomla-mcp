@@ -44,7 +44,6 @@ State clearly what will be changed and wait for explicit user approval.
 When searching for content:
 1. Search by specific name first using the `search` parameter (server-side filter, faster)
 2. If a module search returns nothing, search articles next before exploring Gantry outlines
-3. Use `joomla_backend_inventory` for a broad overview when starting on an unfamiliar site
 
 ## Site Notes
 
@@ -60,5 +59,4 @@ When existing notes become stale or incorrect:
 Additional agent-specific guides are available as MCP resources. Only fetch them when performing that specific workflow:
 
 - `audit-agent` — site audit checklist
-- `builder-agent` — page and menu building workflow
 - `content-agent` — article and content editing workflow
